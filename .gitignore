@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Runtime-generated data -- personal/local state, not source code.
+# Everything here gets created automatically the first time you run the
+# relevant script, so there's nothing lost by excluding these.
+alerts_log.csv
+signal_log.csv
+backtest_results.json
+kalshi_predictions.csv
+kalshi_outcomes_cache.json
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
