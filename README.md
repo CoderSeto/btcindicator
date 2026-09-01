@@ -5,10 +5,10 @@ indicators and order-book pressure line up on a direction. It's a
 **monitor/alert tool** — it surfaces signals and logs alerts to a CSV, but
 it does not place any trades.
 
-Data comes from Coinbase Exchange's public market data API (candles, order
-book), plus Coinbase's, Binance's, and Bybit's public trade/liquidation
-WebSocket feeds for the multi-exchange signals below. None of it needs an
-API key or account.
+Data comes from Coinbase Exchange's public market data API (candles), plus
+Coinbase's, Binance.US's, and Bybit's public WebSocket feeds -- trades and
+liquidations for the cross-exchange flow signals, and level-2 depth for the
+order-book signals. None of it needs an API key or account.
 
 There are two ways to run it:
 
@@ -22,7 +22,11 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-This opens a browser tab at `http://localhost:8501`. From there:
+On Windows with more than one Python installed, go through the `py`
+launcher so you hit the interpreter that actually has these dependencies:
+`py -m pip install -r requirements.txt` then `py -m streamlit run app.py`.
+
+This opens a browser tab at `http://localhost:8501` on its own. From there:
 
 - **Top row** — current price, the composite signal (bullish/bearish/neutral
   with how many indicators agree), and order-book imbalance.
@@ -33,11 +37,14 @@ This opens a browser tab at `http://localhost:8501`. From there:
   why, plus a "reversal watch" callout when an RSI/price divergence pattern
   is detected (see below), and historical hit-rate confidence once you've
   run a backtest. This is commentary on the current pattern, not a forecast.
-- **Indicator badges** — each individual signal shown separately (7 normally,
-  8 when the multi-exchange feeds have collected enough trades to include
-  `agg_delta` -- see below).
-- **Chart, Live Feeds, and Recent alerts** — collapsed by default (click to
-  expand) so the page stays scannable at a glance; open whichever you need.
+- **Indicator badges** — each individual signal shown separately. 7 to
+  start, rising to 9 as the feeds warm up: `book_flow` appears once the
+  depth feeds have `BOOK_FLOW_WINDOW_SECONDS` of history (~1 min) and
+  `agg_delta` once the trade feeds have collected trades -- see below.
+- **Chart, Order Book Depth, Live Feeds, and Recent alerts** — collapsed by
+  default (click to expand) so the page stays scannable at a glance; open
+  whichever you need. The Order Book Depth panel is where the per-venue
+  books, resting-liquidity flow, and any walls that have held show up.
 - **Sidebar** — switch trading pair, adjust the refresh interval (as low
   as 5s, useful for watching a Kalshi window's final minute), adjust how
   many aligned indicators trigger an alert, and run a backtest — all
@@ -53,15 +60,23 @@ pip install -r requirements.txt
 python main.py
 ```
 
+(On Windows: `py -m pip install -r requirements.txt` then `py main.py`.)
+
 It prints a status line every `POLL_INTERVAL` seconds:
 
 ```
-[14:32:05] $61,204.50  composite=BULLISH (5/8)  imbalance=+0.24  sma_cross:BULL ema_cross:BULL rsi:NEUT macd:BULL bollinger:NEUT volume:NEUT orderbook:BULL agg_delta:BULL
-  outlook: A majority of indicators agree on upside pressure (5/8).
+[14:32:05] $61,204.50  composite=BULLISH (5/9)  book=+0.24 (3v, 100% agree, held 41s)  sma_cross:BULL ema_cross:BULL rsi:NEUT macd:BULL bollinger:NEUT volume:NEUT orderbook:BULL book_flow:NEUT agg_delta:BULL
+  book: bid $8,412,660 / ask $5,109,003 within band  |  near +0.31, far +0.19, microprice +0.04bps
+  flow: resting bids +6.2%, asks -3.1% over 60s (net +0.09)
+  wall: $1,340,000 resting 18bps above mid on coinbase (resistance, held 74s)
+  outlook: A majority of indicators agree on upside pressure (5/9).
 ```
 
-(The count is 7 instead of 8 until the multi-exchange feeds have collected
-enough trades to include `agg_delta` -- see "Multi-exchange live feeds" below.)
+(The count starts at 7 and rises to 9 as the feeds warm up -- `book_flow`
+needs about a minute of depth history and `agg_delta` needs collected
+trades. Until then those two are absent rather than voting neutral. The
+`book=` reading is replaced by `imbalance=` if the depth feeds are off or
+still connecting -- see "Multi-exchange order book" below.)
 
 Both options share the same alert threshold logic and the same
 `alerts_log.csv` — you can run either one (or switch between them) without
