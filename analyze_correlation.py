@@ -1,6 +1,6 @@
 """
 Analyzes how much the aggregated exchange delta signal (agg_delta) overlaps
-with the other 7 indicators, using the signal log accumulated by main.py or
+with the other 8 indicators, using the signal log accumulated by main.py or
 app.py (only recorded when config.LOG_ALL_SIGNALS = True).
 
 This answers the "how much is agg_delta double-counting another indicator"
@@ -38,7 +38,12 @@ import config as cfg
 
 _VOTE_MAP = {"bullish": 1, "neutral": 0, "bearish": -1}
 
-_OTHER_INDICATORS = ["sma_cross", "ema_cross", "rsi", "macd", "bollinger", "volume", "orderbook"]
+# book_flow is included here even though it, like agg_delta, is only
+# present once its feed has warmed up -- rows missing either are already
+# handled below, and order-book flow is one of the more plausible things
+# for aggregated taker delta to be double-counting.
+_OTHER_INDICATORS = ["sma_cross", "ema_cross", "rsi", "macd", "bollinger", "volume",
+                     "orderbook", "book_flow"]
 
 
 def load_log(path: str) -> pd.DataFrame:

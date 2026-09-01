@@ -40,6 +40,96 @@ VOLUME_SPIKE_MULTIPLIER = 2.0
 
 IMBALANCE_THRESHOLD = 0.20  # +/-20% skew between bid/ask volume triggers a signal
 
+# --- Multi-exchange order book (see orderbook.py / orderbook_feeds.py) ---
+# Master switch for the live level-2 depth WebSockets (Coinbase, Binance.US,
+# Bybit). With this False the bot falls back to the single Coinbase REST
+# book snapshot it polls each cycle -- still a working order-book signal,
+# just one venue, one snapshot per POLL_INTERVAL, and with no persistence
+# or flow history behind it.
+ENABLE_BOOK_FEEDS = True
+
+# Depth bands, in basis points from mid (1 bp = 0.01%). Book depth is
+# measured by distance from mid rather than by level count because a
+# "level" means something different on every exchange -- Coinbase's
+# BTC-USD book is quoted in $0.01 steps, Bybit's spot book is coarser, so
+# "top 25 levels" covers a totally different slice of each. Basis points
+# are comparable across venues; level counts are not.
+BOOK_BAND_BPS_NEAR = 5.0    # the executable book -- what a market order hits now
+BOOK_BAND_BPS = 25.0        # the working band the directional signal is read from
+BOOK_BAND_BPS_FAR = 100.0   # context: does the wider book agree with the near one?
+
+# Within a band, each level is weighted exp(-distance_bps / BOOK_DECAY_BPS),
+# so resting size at the touch counts for much more than size at the band
+# edge. Set to 0 to weight everything inside a band equally.
+BOOK_DECAY_BPS = 10.0
+
+# A venue whose spread exceeds this is dropped from the aggregate for that
+# refresh -- a blown-out spread usually means a stale or dislocated feed
+# rather than real information.
+BOOK_MAX_SPREAD_BPS = 8.0
+
+# Depth subscribed per venue. Binance's partial-book depth stream supports
+# only 5, 10 or 20; Bybit spot supports 1, 50, 200, 1000. Coinbase's
+# level2_batch channel sends the whole book and isn't configurable.
+BINANCE_BOOK_DEPTH = 20
+BYBIT_BOOK_DEPTH = 200
+
+# How often the aggregated book state is sampled into the rolling history
+# that persistence and flow are computed from, and how much of that
+# history to keep.
+BOOK_SAMPLE_INTERVAL_SECONDS = 1.0
+BOOK_HISTORY_SECONDS = 900
+
+# How much of each local book is kept when it's materialized for the
+# metrics above. Coinbase's level2 feed carries the entire book (tens of
+# thousands of levels), almost none of which is relevant on this bot's
+# timescale; trimming to a wide guard band keeps the per-sample work small
+# while still comfortably covering BOOK_BAND_BPS_FAR and any plausible
+# Kalshi strike distance (500 bps = 5%).
+BOOK_RETAIN_BPS = 500.0
+
+# Imbalance past this (in either direction) counts as a directional read.
+# Separate from IMBALANCE_THRESHOLD above, which applies to the legacy
+# single-snapshot fallback and is on a different (unweighted base-volume)
+# scale -- the two numbers are not interchangeable.
+BOOK_IMBALANCE_THRESHOLD = 0.18
+
+# ...but it only becomes a directional VOTE once it has held that side
+# continuously for this long. A single snapshot of a lopsided book is
+# mostly noise: resting size appears and vanishes constantly, and the
+# whole point of having a time series is to be able to tell a lean that
+# has stuck around from one that flickered. Set to 0 to vote on the
+# instantaneous reading (the old behavior).
+BOOK_PERSISTENCE_SECONDS = 20.0
+
+# --- Resting-liquidity flow (the book_flow signal) ---
+# Compares how each side's resting notional has grown or shrunk over this
+# window: bids stacking while asks get pulled is the classic setup ahead
+# of an upward move, and vice versa.
+BOOK_FLOW_WINDOW_SECONDS = 60.0
+# log(bid growth) - log(ask growth) past this magnitude counts as a signal.
+# 0.20 is roughly "one side's resting notional grew ~22% more than the other's".
+BOOK_FLOW_THRESHOLD = 0.20
+# Adds book_flow as its own vote in the composite. Turn this off to keep
+# the composite exactly as it was and treat flow as display-only context.
+# Like the order-book imbalance signal, it cannot be backtested (see
+# backtest.py) -- so it always carries weight 1.0 in weighted conviction.
+ENABLE_BOOK_FLOW_SIGNAL = True
+
+# --- Liquidity walls ---
+# A price level counts as a wall when its resting notional is at least
+# BOOK_WALL_MULTIPLE times the median level inside the band AND at least
+# BOOK_WALL_MIN_NOTIONAL in absolute terms.
+BOOK_WALL_MULTIPLE = 4.0
+BOOK_WALL_MIN_NOTIONAL = 250_000
+# A wall is only reported as "held" once it has been continuously present
+# for this long. A wall that appears and vanishes as price approaches is
+# indistinguishable from a spoof, and age is the only evidence available.
+BOOK_WALL_MIN_AGE_SECONDS = 15.0
+# How close two sightings must be (in bps) to count as the same wall
+# across samples, so a wall isn't "reset" by a one-tick reprice.
+BOOK_WALL_MATCH_BPS = 2.0
+
 # Minimum number of aligned individual signals required to fire a composite alert
 COMPOSITE_ALERT_THRESHOLD = 3
 

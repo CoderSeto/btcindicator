@@ -3,11 +3,13 @@ Backtests the bot's price-based signal patterns against real historical
 BTC data to answer: "when this same signal combination has shown up
 before, how often did price actually turn within the next few candles?"
 
-Important limitation: Coinbase's public API doesn't expose historical
-order-book snapshots, so this backtest only covers the 6 candle-based
-indicators (SMA/EMA cross, RSI, MACD, Bollinger, volume spike) -- not the
-order-book imbalance signal, which only exists live. Order-book imbalance
-has no path to historical backtesting at all. The aggregated exchange
+Important limitation: no exchange publishes historical order-book
+snapshots, so this backtest only covers the 6 candle-based indicators
+(SMA/EMA cross, RSI, MACD, Bollinger, volume spike) -- not the two
+order-book signals (`orderbook` imbalance and `book_flow`), which only
+exist live and have no path to historical backtesting at all. Live depth
+could be recorded going forward to build such a history, but nothing
+downloadable exists to backtest against today. The aggregated exchange
 delta signal (agg_delta) is in the same boat here, but CAN be backtested
 separately -- see backtest_agg_delta.py, which reconstructs historical
 agg_delta readings from Binance.US's trade history and merges the result

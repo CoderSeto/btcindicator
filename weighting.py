@@ -43,10 +43,11 @@ def compute_weights(results, cfg) -> dict:
     the 6 backtestable candle-based indicators, plus agg_delta if
     backtest_agg_delta.py has been run (its buckets are keyed the same
     way -- "agg_delta_bullish"/"agg_delta_bearish" -- so this picks them
-    up automatically, no special-casing needed). Order-book imbalance has
-    no entry here -- Coinbase exposes no historical order-book data, so
-    there's no way to backtest it at all; callers should default to
-    weight 1.0 for it and any other name not present.
+    up automatically, no special-casing needed). Neither order-book signal
+    has an entry here: no exchange publishes historical level-2 snapshots,
+    so there is no way to backtest either the imbalance vote or book flow
+    at all. Callers should default to weight 1.0 for them and for any
+    other name not present.
     """
     buckets = (results or {}).get("indicator_buckets", {})
     weights = {}
@@ -61,9 +62,9 @@ def compute_weights(results, cfg) -> dict:
 def weighted_conviction(snapshot, weights: dict) -> dict:
     """
     Applies per-indicator weights to the live signal snapshot. Indicators
-    with no entry in `weights` (order-book imbalance, aggregated exchange
-    delta) get weight 1.0 -- counted the same as in the raw composite,
-    just without any historical up/down-weighting applied.
+    with no entry in `weights` -- the two order-book signals (`orderbook`
+    and `book_flow`) -- get weight 1.0, counted the same as in the raw
+    composite, just without any historical up/down-weighting applied.
 
     Returns {"available": False} if every individual signal is neutral
     (nothing directional to weigh). Otherwise:

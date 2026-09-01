@@ -21,25 +21,33 @@ import weighting
 @dataclass
 class DashboardState:
     df: Optional[pd.DataFrame] = None
-    imbalance: float = 0.0
+    imbalance: Optional[float] = None
     snapshot: Optional["signals.SignalSnapshot"] = None
     divergence: dict = field(default_factory=dict)
     outlook: dict = field(default_factory=dict)
     backtest_results: Optional[dict] = None
     feed_snapshot: Optional[dict] = None
+    book_snapshot: Optional[dict] = None
     weighted: dict = field(default_factory=dict)
     error: Optional[str] = None
 
 
-def load_state(cfg, feed_snapshot: Optional[dict] = None) -> DashboardState:
+def load_state(cfg, feed_snapshot: Optional[dict] = None,
+               book_snapshot: Optional[dict] = None) -> DashboardState:
     """
     feed_snapshot is the current exchange_feeds snapshot dict (from
-    FeedHandle.snapshot()), if the multi-exchange feeds are running --
-    pass None to run on Coinbase REST data alone.
+    FeedHandle.snapshot()), if the multi-exchange trade feeds are running.
+    book_snapshot is the current orderbook_feeds snapshot dict (from
+    BookFeedHandle.snapshot()), if the level-2 depth feeds are running.
+    Pass None for either to run without it -- with no book_snapshot the
+    order-book signal falls back to a single Coinbase REST snapshot.
     """
+    have_book = bool(book_snapshot and book_snapshot.get("available"))
     try:
         df = data_fetch.get_candles(cfg.PRODUCT_ID, cfg.GRANULARITY, cfg.CANDLE_HISTORY)
-        book = data_fetch.get_order_book(cfg.PRODUCT_ID, level=2)
+        # Only needed for the fallback path -- the live depth feeds already
+        # carry a better read of the same thing, so skip the extra request.
+        rest_book = None if have_book else data_fetch.get_order_book(cfg.PRODUCT_ID, level=2)
     except Exception as e:
         return DashboardState(error=str(e))
 
@@ -48,13 +56,16 @@ def load_state(cfg, feed_snapshot: Optional[dict] = None) -> DashboardState:
         return DashboardState(error="Not enough candle history yet -- try again shortly.")
 
     df = indicators.compute_all(df, cfg)
-    imbalance = orderbook.compute_imbalance(book, cfg.ORDER_BOOK_DEPTH)
+    # None, not 0.0: the REST snapshot was never taken, which is a
+    # different thing from a book that read as balanced.
+    imbalance = None if have_book else orderbook.compute_imbalance(rest_book, cfg.ORDER_BOOK_DEPTH)
 
     agg_delta = None
     if feed_snapshot and feed_snapshot.get("total_notional", 0) > 0:
         agg_delta = feed_snapshot["delta_ratio"]
 
-    snap = signals.evaluate(df, imbalance, cfg, agg_delta=agg_delta)
+    snap = signals.evaluate(df, imbalance, cfg, agg_delta=agg_delta,
+                            book_snapshot=book_snapshot)
     price_only_snap = signals.evaluate_price_only(df, cfg)
     div = divergence.detect_divergence(df, cfg.DIVERGENCE_LOOKBACK, cfg.DIVERGENCE_SWING_ORDER)
 
@@ -67,5 +78,5 @@ def load_state(cfg, feed_snapshot: Optional[dict] = None) -> DashboardState:
     return DashboardState(
         df=df, imbalance=imbalance, snapshot=snap, divergence=div,
         outlook=out, backtest_results=backtest_results, feed_snapshot=feed_snapshot,
-        weighted=weighted,
+        book_snapshot=book_snapshot, weighted=weighted,
     )

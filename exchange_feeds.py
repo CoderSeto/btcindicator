@@ -363,8 +363,18 @@ class TradeAggregator:
 
 # --- WebSocket runners ---------------------------------------------------
 
-def _reconnecting_run(name: str, create_app_fn, stop_event: threading.Event,
-                       aggregator: TradeAggregator, holder: dict):
+def run_with_reconnect(name: str, create_app_fn, stop_event: threading.Event,
+                        status_sink, holder: dict):
+    """
+    Runs a WebSocketApp forever, reconnecting with exponential backoff (1s
+    doubling to a 30s ceiling) until `stop_event` is set, reporting each
+    transition through `status_sink.set_status(name, state)`.
+
+    `status_sink` is anything with a `set_status(name, state)` method --
+    TradeAggregator here, BookAggregator in orderbook_feeds, which reuses
+    this rather than keeping a second copy of the reconnect logic.
+    """
+    aggregator = status_sink
     backoff = 1
     while not stop_event.is_set():
         aggregator.set_status(name, "connecting")
@@ -409,7 +419,7 @@ def _coinbase_runner(aggregator: TradeAggregator, product_id: str, stop_event: t
         return websocket.WebSocketApp(url, on_open=on_open, on_message=on_message,
                                        on_error=on_error, on_close=on_close)
 
-    _reconnecting_run(name, create_app, stop_event, aggregator, holder)
+    run_with_reconnect(name, create_app, stop_event, aggregator, holder)
 
 
 def _binance_us_trade_runner(aggregator: TradeAggregator, symbol: str, stop_event: threading.Event, holder: dict):
@@ -458,7 +468,7 @@ def _binance_us_trade_runner(aggregator: TradeAggregator, symbol: str, stop_even
         return websocket.WebSocketApp(url, on_open=on_open, on_message=on_message,
                                        on_error=on_error, on_close=on_close)
 
-    _reconnecting_run(name, create_app, stop_event, aggregator, holder)
+    run_with_reconnect(name, create_app, stop_event, aggregator, holder)
 
 
 def _binance_liquidation_runner(aggregator: TradeAggregator, symbol: str, stop_event: threading.Event, holder: dict):
@@ -489,7 +499,7 @@ def _binance_liquidation_runner(aggregator: TradeAggregator, symbol: str, stop_e
         return websocket.WebSocketApp(url, on_open=on_open, on_message=on_message,
                                        on_error=on_error, on_close=on_close)
 
-    _reconnecting_run(name, create_app, stop_event, aggregator, holder)
+    run_with_reconnect(name, create_app, stop_event, aggregator, holder)
 
 
 def _bybit_trade_runner(aggregator: TradeAggregator, symbol: str, stop_event: threading.Event, holder: dict):
@@ -518,7 +528,7 @@ def _bybit_trade_runner(aggregator: TradeAggregator, symbol: str, stop_event: th
         return websocket.WebSocketApp(url, on_open=on_open, on_message=on_message,
                                        on_error=on_error, on_close=on_close)
 
-    _reconnecting_run(name, create_app, stop_event, aggregator, holder)
+    run_with_reconnect(name, create_app, stop_event, aggregator, holder)
 
 
 def _bybit_liquidation_runner(aggregator: TradeAggregator, symbol: str, stop_event: threading.Event, holder: dict):
@@ -547,7 +557,7 @@ def _bybit_liquidation_runner(aggregator: TradeAggregator, symbol: str, stop_eve
         return websocket.WebSocketApp(url, on_open=on_open, on_message=on_message,
                                        on_error=on_error, on_close=on_close)
 
-    _reconnecting_run(name, create_app, stop_event, aggregator, holder)
+    run_with_reconnect(name, create_app, stop_event, aggregator, holder)
 
 
 class FeedHandle:

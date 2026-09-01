@@ -20,6 +20,11 @@ signal_log.csv
 backtest_results.json
 kalshi_predictions.csv
 kalshi_outcomes_cache.json
+# Older-layout logs rotated aside when a column is added (see CLAUDE.md gotcha #1)
+*.csv.*.bak
+
+# Test artifacts
+.pytest_cache/
 
 # OS cruft
 .DS_Store

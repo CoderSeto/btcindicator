@@ -3,13 +3,19 @@ Turns raw indicator values into discrete bullish/bearish/neutral signals,
 then combines them into a composite read on market movement.
 """
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
 class SignalSnapshot:
     price: float
     individual: dict = field(default_factory=dict)  # name -> "bullish"/"bearish"/"neutral"
-    imbalance: float = 0.0
+    # Legacy single-snapshot Coinbase REST book imbalance. None means it
+    # was never computed (the live depth feeds were up, so the extra REST
+    # request was skipped) -- which is a different thing from 0.0, a real
+    # reading of a balanced book. The loggers write a blank cell for None.
+    imbalance: Optional[float] = None
+    book: dict = field(default_factory=dict)  # summarize_book() result, {} when unavailable
 
     @property
     def bullish_count(self) -> int:
@@ -89,19 +95,126 @@ def _evaluate_price_signals(last, prev, cfg) -> dict:
     return signals
 
 
-def evaluate(df, imbalance: float, cfg, agg_delta: float = None) -> SignalSnapshot:
+def summarize_book(book_snapshot: dict) -> dict:
+    """
+    Flattens an `orderbook_feeds.BookFeedHandle.snapshot()` result into the
+    handful of scalars the signal, the logs and the UI all want, so none of
+    them has to reach three levels into a nested dict and guess at defaults.
+
+    Returns {"available": False} when the depth feeds aren't up or haven't
+    produced a usable book yet -- callers must treat that as "no data",
+    which is a different thing from a balanced book.
+    """
+    if not book_snapshot or not book_snapshot.get("available"):
+        return {"available": False}
+
+    agg = book_snapshot["aggregate"]
+    persistence = book_snapshot["persistence"]
+    flow = book_snapshot["flow"]
+
+    return {
+        "available": True,
+        "imbalance": agg["imbalance"],
+        "imbalance_near": agg["imbalance_near"],
+        "imbalance_far": agg["imbalance_far"],
+        "microprice_bps": agg["microprice_bps"],
+        "agreement": agg["agreement"],
+        "bid_notional": agg["bid_notional"],
+        "ask_notional": agg["ask_notional"],
+        "venue_count": agg["venue_count"],
+        "venues": agg["venues"],
+        "excluded": agg.get("excluded", {}),
+        "persistence_seconds": persistence["seconds"],
+        "persistence_direction": persistence["direction"],
+        "flow_available": flow.get("available", False),
+        "flow_value": flow.get("value"),
+        "flow_reason": flow.get("reason"),
+        "flow_window_seconds": flow.get("window_seconds"),
+        "bid_change_pct": flow.get("bid_change_pct"),
+        "ask_change_pct": flow.get("ask_change_pct"),
+        "walls": book_snapshot.get("walls", []),
+        "held_walls": [w for w in book_snapshot.get("walls", []) if w.get("held")],
+        "samples": book_snapshot.get("samples", 0),
+        "history_seconds": book_snapshot.get("history_seconds", 0.0),
+        "status": book_snapshot.get("status", {}),
+    }
+
+
+def _orderbook_signal(book: dict, imbalance: Optional[float], cfg) -> str:
+    """
+    The order-book vote.
+
+    With the live depth feeds up, a lean only becomes a vote once it has
+    held the same side past BOOK_IMBALANCE_THRESHOLD continuously for
+    BOOK_PERSISTENCE_SECONDS. That gate is the whole point of maintaining
+    a live book: resting size is placed and pulled constantly, so any
+    single reading of a lopsided book is mostly noise, and "it has looked
+    like this for the last half a minute" is a far stronger statement than
+    "it looks like this in the frame I happened to sample".
+
+    Without the feeds, this falls back to the original behavior -- one
+    Coinbase REST snapshot against IMBALANCE_THRESHOLD, with no time
+    dimension available to gate on.
+    """
+    if book.get("available"):
+        direction = book["persistence_direction"]
+        if direction and book["persistence_seconds"] >= cfg.BOOK_PERSISTENCE_SECONDS:
+            return direction
+        return "neutral"
+
+    reading = imbalance or 0.0
+    if reading > cfg.IMBALANCE_THRESHOLD:
+        return "bullish"
+    if reading < -cfg.IMBALANCE_THRESHOLD:
+        return "bearish"
+    return "neutral"
+
+
+def _book_flow_signal(book: dict, cfg) -> str:
+    """
+    Resting liquidity being added to one side relative to the other:
+    bids stacking and/or asks being pulled reads bullish, and vice versa.
+
+    Distinct from the imbalance vote above -- imbalance is about the shape
+    of the book right now, flow is about which way that shape is moving,
+    and they routinely disagree (a heavily bid book whose bids are being
+    pulled is a different situation from one that's still filling in).
+    """
+    if not book.get("available") or not book.get("flow_available"):
+        return "neutral"
+    value = book["flow_value"]
+    if value > cfg.BOOK_FLOW_THRESHOLD:
+        return "bullish"
+    if value < -cfg.BOOK_FLOW_THRESHOLD:
+        return "bearish"
+    return "neutral"
+
+
+def evaluate(df, imbalance: Optional[float], cfg, agg_delta: float = None,
+             book_snapshot: dict = None) -> SignalSnapshot:
+    """
+    The live path: candle signals plus the order-book and cross-exchange
+    trade-flow signals that only exist in real time.
+
+    `imbalance` is the legacy single-snapshot Coinbase REST reading, still
+    used as the fallback when `book_snapshot` (from
+    orderbook_feeds.BookFeedHandle.snapshot()) is absent or not yet warmed
+    up. Pass None when it wasn't computed at all.
+    """
     last = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else last
 
     signals = _evaluate_price_signals(last, prev, cfg)
+    book = summarize_book(book_snapshot)
 
-    # Order book imbalance
-    if imbalance > cfg.IMBALANCE_THRESHOLD:
-        signals["orderbook"] = "bullish"
-    elif imbalance < -cfg.IMBALANCE_THRESHOLD:
-        signals["orderbook"] = "bearish"
-    else:
-        signals["orderbook"] = "neutral"
+    signals["orderbook"] = _orderbook_signal(book, imbalance, cfg)
+
+    # Only voted on when the feeds are actually up and have enough history
+    # to measure a change -- an absent signal is left out of the snapshot
+    # entirely rather than logged as a neutral it didn't earn (the loggers
+    # write a blank cell for it; see ALL_SIGNAL_NAMES in main.py).
+    if cfg.ENABLE_BOOK_FLOW_SIGNAL and book.get("available") and book.get("flow_available"):
+        signals["book_flow"] = _book_flow_signal(book, cfg)
 
     # Multi-exchange aggregated taker buy/sell delta (only present when
     # exchange_feeds is enabled and has collected at least some trades)
@@ -113,7 +226,8 @@ def evaluate(df, imbalance: float, cfg, agg_delta: float = None) -> SignalSnapsh
         else:
             signals["agg_delta"] = "neutral"
 
-    return SignalSnapshot(price=float(last["close"]), individual=signals, imbalance=imbalance)
+    return SignalSnapshot(price=float(last["close"]), individual=signals,
+                          imbalance=imbalance, book=book)
 
 
 def evaluate_price_only(df, cfg) -> SignalSnapshot:
@@ -125,4 +239,4 @@ def evaluate_price_only(df, cfg) -> SignalSnapshot:
     last = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else last
     signals = _evaluate_price_signals(last, prev, cfg)
-    return SignalSnapshot(price=float(last["close"]), individual=signals, imbalance=0.0)
+    return SignalSnapshot(price=float(last["close"]), individual=signals, imbalance=None)

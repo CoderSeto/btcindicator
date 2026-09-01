@@ -10,7 +10,8 @@ advice and shouldn't be treated as one.
 
 # Ordered roughly by how much weight each indicator typically carries for
 # spotting a near-term turn (vs. just confirming an established trend).
-_PRIORITY = ["rsi", "bollinger", "agg_delta", "orderbook", "macd", "volume", "sma_cross", "ema_cross"]
+_PRIORITY = ["rsi", "bollinger", "agg_delta", "orderbook", "book_flow", "macd", "volume",
+             "sma_cross", "ema_cross"]
 
 _DRIVER_PHRASES = {
     "rsi": {
@@ -26,8 +27,12 @@ _DRIVER_PHRASES = {
         "bearish": "taker selling is outpacing buying across exchanges right now",
     },
     "orderbook": {
-        "bullish": "the order book is currently buy-heavy",
-        "bearish": "the order book is currently sell-heavy",
+        "bullish": "resting bids have outweighed offers across exchanges for a sustained stretch",
+        "bearish": "resting offers have outweighed bids across exchanges for a sustained stretch",
+    },
+    "book_flow": {
+        "bullish": "resting liquidity is building on the bid and/or thinning on the offer",
+        "bearish": "resting liquidity is building on the offer and/or thinning on the bid",
     },
     "macd": {
         "bullish": "MACD just crossed above its signal line",
@@ -133,14 +138,47 @@ def _weighted_line(weighted: dict, snapshot) -> str:
         )
 
 
+def _book_note(snapshot) -> str:
+    """
+    One line of order-book context: the largest resting wall that has
+    actually held, and where it sits relative to price.
+
+    Only walls that have persisted past BOOK_WALL_MIN_AGE_SECONDS are
+    described, because a large level that appears and vanishes as price
+    approaches is indistinguishable from a spoof, and describing one as a
+    barrier would be worse than saying nothing. Even a held wall is
+    described as what it is -- resting size, which can still be pulled --
+    rather than as a floor or a ceiling.
+    """
+    book = getattr(snapshot, "book", None) or {}
+    if not book.get("available"):
+        return ""
+
+    held = book.get("held_walls") or []
+    if not held:
+        return ""
+
+    wall = max(held, key=lambda w: w["notional"])
+    where = "below" if wall["side"] == "bid" else "above"
+    return (
+        f"Order book: ${wall['notional']:,.0f} of resting size sits {wall['distance_bps']:.0f}bps "
+        f"{where} mid on {wall.get('venue', 'an exchange')} and has been there "
+        f"{wall['age_seconds']:.0f}s. Price would have to work through it to continue "
+        f"{'down' if where == 'below' else 'up'} -- but resting size is not a floor or a "
+        f"ceiling, and can be pulled the moment price gets close."
+    )
+
+
 def build_outlook(snapshot, divergence: dict, confidence: dict = None, weighted: dict = None) -> dict:
     """
     Returns {"headline": str, "detail": str, "caution": str | None,
-    "confidence_lines": list[str], "weighted_line": str}.
+    "book_note": str, "confidence_lines": list[str], "weighted_line": str}.
     `caution` is set when a reversal-type divergence pattern was found,
     especially when it runs counter to the current composite lean.
     `confidence_lines` holds backtested historical hit-rate readouts, if a
     matching backtest has been run (empty list otherwise).
+    `book_note` describes the largest order-book wall that has actually
+    held, if there is one (empty string otherwise).
     `weighted_line` holds a one-line read from weighting.weighted_conviction(),
     a second opinion that weighs each indicator by its own backtested
     accuracy rather than counting all of them equally (empty string if no
@@ -170,6 +208,7 @@ def build_outlook(snapshot, divergence: dict, confidence: dict = None, weighted:
         "headline": headline,
         "detail": detail,
         "caution": caution,
+        "book_note": _book_note(snapshot),
         "confidence_lines": _confidence_lines(confidence),
         "weighted_line": _weighted_line(weighted, snapshot),
     }

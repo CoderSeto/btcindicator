@@ -8,8 +8,8 @@ certain things are the way they are, and what's already gone wrong once.
 ## What this is
 
 A BTC (and other pairs) technical-indicator bot with a Streamlit dashboard
-and a console mode. It computes 7-8 signals from live Coinbase data plus
-multi-exchange trade flow, backtests them against real historical data,
+and a console mode. It computes 7-9 signals from live Coinbase data plus
+multi-exchange trade flow and multi-exchange level-2 depth, backtests them against real historical data,
 weights them by empirical accuracy, and includes a standalone fair-value
 probability calculator for Kalshi's 15-minute BTC binary contracts. No
 API keys anywhere -- every integration (Coinbase, Binance.US, Bybit,
@@ -28,22 +28,39 @@ such, not slipped in quietly.
 - `exchange_feeds.py` -- live WebSocket feeds (Coinbase, Binance.US,
   Bybit trades + liquidations) feeding into `TradeAggregator`, a
   thread-safe rolling buy/sell aggregator. Also has the Binance.US REST
-  historical-trades client used by `backtest_agg_delta.py`.
+  historical-trades client used by `backtest_agg_delta.py`, and
+  `run_with_reconnect()`, the shared reconnect/backoff loop that
+  `orderbook_feeds.py` reuses.
+- `orderbook_feeds.py` -- live level-2 depth WebSockets (Coinbase
+  `level2_batch`, Binance.US diff-depth + REST snapshot, Bybit
+  `orderbook.200`) maintained as `LocalBook`s inside a `BookAggregator`,
+  which samples the aggregated metrics once a second into a rolling
+  history. That history is the whole point: persistence, resting-liquidity
+  flow and wall age are all things a single snapshot cannot answer.
 
 **Signal computation**
 - `indicators.py` -- SMA/EMA/RSI/MACD/Bollinger/volume-spike, computed
   once per refresh on the full candle DataFrame (vectorized, not
   per-row).
-- `orderbook.py` -- order-book imbalance from a level-2 snapshot.
+- `orderbook.py` -- all order-book math, as pure functions over a
+  normalized book dict. Depth is measured in **basis points from mid** and
+  in **notional**, never in level counts or base volume -- see gotcha #6.
+  Also microprice, spread, wall detection, and `aggregate_metrics()`,
+  which combines per-venue reads (see gotcha #7 for why it averages ratios
+  rather than merging books).
 - `signals.py` -- two entry points, both important:
-  - `evaluate()` -- the live path, includes order-book imbalance and
-    `agg_delta` (7-8 signals total).
+  - `evaluate()` -- the live path, adding `orderbook`, `book_flow` and
+    `agg_delta` to the 6 candle signals (7-9 total, depending on which
+    feeds have warmed up). The `orderbook` vote is persistence-gated: a
+    lean only counts once it has held past `BOOK_IMBALANCE_THRESHOLD` for
+    `BOOK_PERSISTENCE_SECONDS`. Falls back to the legacy single-snapshot
+    Coinbase REST reading when the depth feeds aren't up.
   - `evaluate_price_only()` -- the backtestable path, only the 6
-    candle-derived signals. Order-book and agg_delta have no historical
-    data source (Coinbase exposes no historical order book; no exchange
-    has a practical historical multi-exchange trade feed), so they're
-    deliberately excluded here. `backtest_agg_delta.py` is the one
-    exception -- see below.
+    candle-derived signals. The two order-book signals and agg_delta have
+    no historical data source (no exchange publishes historical level-2
+    snapshots; no exchange has a practical historical multi-exchange trade
+    feed), so they're deliberately excluded here. `backtest_agg_delta.py`
+    is the one exception -- see below.
 - `divergence.py` -- RSI/price divergence (reversal) detection.
 
 **Backtesting and weighting**
@@ -71,8 +88,10 @@ such, not slipped in quietly.
 
 **Interfaces**
 - `main.py` -- console loop. Also owns `log_alert()` and
-  `log_signal_snapshot()`, and the `ALL_SIGNAL_NAMES` fixed-schema
-  constant both use (see gotcha #1 below).
+  `log_signal_snapshot()`, the `ALL_SIGNAL_NAMES` / `BOOK_LOG_FIELDS`
+  fixed-schema constants both use, and `_needs_header()`, which rotates a
+  log aside when its column layout changes between releases (see gotcha
+  #1 below).
 - `dashboard_data.py` -- `load_state()`, the fetch+compute pipeline the
   dashboard calls once per refresh.
 - `app.py` -- the Streamlit dashboard. Layout is deliberately
@@ -101,10 +120,12 @@ such, not slipped in quietly.
 
 1. **Never blend independently-sourced probability/confidence numbers
    without validated evidence for the blending method.** This shows up
-   three times: weighted conviction is shown *separately* from the raw
+   four times now: weighted conviction is shown *separately* from the raw
    composite; the Kalshi model's P(YES) is shown *separately* from the
-   bot's backtested confidence; correlation analysis and hit-rate
-   backtesting are kept as distinct tools. We have real evidence some
+   bot's backtested confidence; the "resting liquidity between spot and
+   the strike" readout sits *next to* an unchanged P(YES) rather than
+   adjusting it; correlation analysis and hit-rate backtesting are kept as
+   distinct tools. We have real evidence some
    signals have historical edge. We do not have validated evidence for
    the *correct way* to combine multiple such numbers into one. Don't
    invent a formula and present it with more confidence than it's
@@ -122,11 +143,24 @@ such, not slipped in quietly.
    table marks low-n buckets rather than presenting them at face value.
 
 4. **Fixed CSV schemas, always.** Any logged row where a field might not
-   always be present (the running example: `agg_delta`, which only
-   exists once the multi-exchange feeds have collected trades) must use
-   a fixed, pre-declared column list with blank cells for missing
-   values -- never derive the header from whatever happens to be in the
-   first row. See gotcha #1.
+   always be present (running examples: `agg_delta` and `book_flow`, which
+   only exist once their feeds have warmed up) must use a fixed,
+   pre-declared column list with blank cells for missing values -- never
+   derive the header from whatever happens to be in the first row. Note
+   *blank*, not zero: for a numeric column like `book_imbalance`, zero is
+   a real reading (a balanced book) and must stay distinguishable from
+   "the feed was down". See gotcha #1.
+
+5. **Absent, not neutral.** A signal with no data is left out of
+   `snapshot.individual` entirely rather than recorded as a neutral vote.
+   A neutral vote is a claim ("I looked, and it's balanced"); silence
+   isn't. The loggers turn that absence into a blank cell, and the
+   composite denominator shrinks accordingly.
+
+6. **Time is evidence.** Where a reading can be sampled over time, prefer
+   "this has held for N seconds" to "this is true in the frame I
+   sampled". The order-book persistence gate and wall ageing both exist
+   for this reason, and both cost nothing but a rolling deque.
 
 ## Known gotchas (already caused real bugs -- don't reintroduce)
 
@@ -139,6 +173,13 @@ such, not slipped in quietly.
    both `log_alert()` and `log_signal_snapshot()` use, writing `""` for
    any indicator not present in a given snapshot. Any new logging
    function needs the same treatment if its row shape can vary.
+
+   Same corruption, second route: **adding a column in a new release**
+   appends wider rows to a file already written under the narrower
+   header. `_needs_header()` handles that now -- if the on-disk header
+   doesn't match the expected one, the old file is renamed to
+   `<path>.<timestamp>.bak` and a fresh one is started, so both files
+   stay internally consistent and readable. Never just append.
 
 2. **pandas datetime resolution is not reliably nanoseconds.**
    `pd.to_datetime(x, unit="s")` does not consistently produce
@@ -165,14 +206,55 @@ such, not slipped in quietly.
    `exchange_feeds.py`. Any new code touching raw liquidation payloads
    should go through those functions, not re-derive this logic.
 
-4. **Binance.com blocks US IPs from its spot API/WebSocket.** This
+4. **Coinbase Exchange's `level2` WebSocket channel requires
+   authentication** (since 2023-08-01, along with the Full and Level3
+   channels). `level2_batch` is the unauthenticated equivalent -- same
+   JSON schema, batched every 50ms -- and is what `orderbook_feeds.py`
+   subscribes to. If depth ever silently stops arriving from Coinbase,
+   check this first; subscribing to `level2` will look like a connection
+   that works and then never sends a snapshot. Keeping this project
+   key-free is the constraint that decides it.
+
+5. **Binance.com blocks US IPs from its spot API/WebSocket.** This
    project uses Binance.US for spot trades specifically because of this
    (see `_binance_us_trade_runner` in `exchange_feeds.py`). Binance's
    futures liquidation stream (`fstream.binance.com`) is a different
    domain and isn't affected the same way -- that one still uses
    binance.com directly.
 
-5. **Windows dev environment needs `py`, not `python`/`pip` directly.**
+6. **Order-book depth measured in "levels" is not comparable across
+   exchanges.** Coinbase quotes BTC-USD in $0.01 increments, so 25 levels
+   can span well under a dollar; Bybit's spot book is much coarser. The
+   original signal summed base volume over the top 25 levels, which meant
+   it was measuring a different slice of the book on every venue and
+   couldn't be aggregated honestly. Everything in `orderbook.py` is now in
+   **basis points from mid** (venue-independent) and in **notional**
+   (`price * size`, which is what actually has to be absorbed). If you add
+   a metric here, keep both conventions.
+
+7. **Never merge order books across venues by pooling price levels.**
+   Coinbase quotes BTC-USD; Binance.US and Bybit quote BTCUSDT. USDT is
+   not a dollar and the basis drifts by tens of basis points, so a pooled
+   book has a fictional mid and a near band that mixes levels 2bps from
+   mid on one venue with levels 30bps away on another. It produces
+   plausible-looking numbers that mean nothing. `aggregate_metrics()`
+   instead averages each venue's *dimensionless* imbalance ratio --
+   measured against its own mid, so basis-invariant -- weighted by in-band
+   notional. The same trap applies to any future cross-venue price
+   arithmetic here.
+
+8. **Binance's local-order-book procedure is not optional bookkeeping.**
+   `<symbol>@depth@100ms` is a diff stream: it must be spliced onto a REST
+   snapshot, and every event's `U`/`u` checked against the local update ID.
+   `U > local + 1` means events were missed and the only correct response
+   is to *discard the book and re-seed* -- patching over the hole leaves a
+   book that looks fine and is quietly wrong, with no error anywhere. That
+   logic lives in `BookAggregator.apply_sequenced_update()` /
+   `seed_sequenced_book()` (methods rather than inline callback code
+   specifically so it can be unit tested without a socket), and is covered
+   in `tests/test_orderbook_feeds.py`.
+
+9. **Windows dev environment needs `py`, not `python`/`pip` directly.**
    Not a code issue, but worth knowing if giving the user shell
    commands: their machine has multiple Python installs, and only the
    `py` launcher (`py`, `py -m pip`) reliably hits the one with this
@@ -180,31 +262,44 @@ such, not slipped in quietly.
 
 ## Testing approach
 
-There's no committed test suite (no `pytest`/`unittest` files in the
-repo) -- everything so far was tested via throwaway scripts during
-development, run once, discarded. The standard those scripts held to,
-worth matching if you add a real suite:
+There **is** now a committed suite, in `tests/`, run with `pytest` (add
+`pip install pytest`; it's the only dev-only dependency). It was added
+alongside the order-book work and currently covers `orderbook.py`,
+`orderbook_feeds.py`, the order-book paths through `signals.py`, and the
+CSV logging in `main.py`.
 
-- Anything touching real math (probability formulas, statistical
-  estimators, sliding-window aggregations) gets cross-validated against
-  an independent reference. Example: `kalshi.py`'s normal CDF was
-  checked against `scipy.stats.norm.cdf` to machine precision; the
-  agg_delta sliding-window reconstruction was checked against a naive
-  O(n*m) brute-force implementation across random data.
-- Anything parsing an external API's schema gets tested against real,
+Everything before that was tested with throwaway scripts, run once and
+discarded. The standard those held to is the standard the suite holds to,
+and is what any new tests should match:
+
+- Anything touching real math gets cross-validated against an independent
+  reference, not just checked for "runs without crashing". Examples:
+  `kalshi.py`'s normal CDF was checked against `scipy.stats.norm.cdf` to
+  machine precision; `reconstruct_agg_delta_series` against a naive
+  O(n*m) brute force; and in the committed suite, the banded/decayed depth
+  sums against a deliberately naive brute-force implementation (no sorting
+  assumptions, no early exit) across randomized books -- which is
+  specifically what would catch a bug in `side_depth`'s early `break`.
+- Anything parsing an external API's schema is tested against real,
   verbatim example payloads from that API's own documentation -- never
-  guessed field names.
-- Anything writing a CSV log gets tested for the "a field appears or
-  disappears partway through a session" case explicitly (see gotcha #1
-  -- this is exactly the scenario that wasn't tested and broke).
-- Calibration/statistical code gets tested against a hand-constructed
-  dataset with a known, exact expected answer (not just "runs without
-  crashing").
+  guessed field names. `tests/test_orderbook_feeds.py` names its sources
+  in the module docstring; keep doing that, so the next person can
+  re-verify them.
+- Anything writing a CSV log is tested for the "a field appears or
+  disappears partway through a session" case explicitly, and for the
+  "column layout changed between releases" case -- see gotcha #1, both
+  routes to the same corruption.
+- Statistical/derived code is tested against hand-constructed data with a
+  known, exact expected answer. The persistence and flow tests build a
+  history by hand and assert the exact seconds and the exact `log` value.
+- Where a property matters more than a value, test the property: flow is
+  asserted to be antisymmetric and to cancel a book-wide liquidity swing;
+  wall detection is asserted to use the median rather than the mean, via a
+  wall large enough to hide itself under a mean.
 
-If you add `pytest`, the functions in `kalshi.py`, `weighting.py`,
-`backtest_agg_delta.py`'s `reconstruct_agg_delta_series`, and the CSV
-logging functions in `main.py`/`kalshi_tracking.py` are the highest-value
-places to start, since they've already caused real bugs once.
+Still uncovered, in rough priority order if you're adding more:
+`kalshi.py`, `weighting.py`, `backtest_agg_delta.py`'s
+`reconstruct_agg_delta_series`, and `kalshi_tracking.py`'s logging.
 
 ## Common commands
 
@@ -213,7 +308,9 @@ streamlit run app.py              # dashboard (primary interface)
 python main.py                    # console alternative
 python backtest.py                # historical hit-rate backtest (run before backtest_agg_delta.py)
 python backtest_agg_delta.py      # adds agg_delta hit rates to the same results file
-python exchange_feeds.py          # sanity-check exchange WebSocket connectivity
+pytest                            # run the test suite (needs: pip install pytest)
+python exchange_feeds.py          # sanity-check trade WebSocket connectivity
+python orderbook_feeds.py         # sanity-check level-2 depth WebSocket connectivity
 python kalshi_api.py              # sanity-check Kalshi API connectivity
 python kalshi.py --strike X --minutes Y   # one-off Kalshi fair-value check
 python analyze_correlation.py     # needs LOG_ALL_SIGNALS=True first
@@ -224,4 +321,7 @@ python kalshi_tracking.py         # needs LOG_KALSHI_PREDICTIONS=True first
 
 `alerts_log.csv`, `signal_log.csv`, `backtest_results.json`,
 `kalshi_predictions.csv`, `kalshi_outcomes_cache.json` -- all created
-automatically by the scripts above on first use.
+automatically by the scripts above on first use. Plus
+`*.csv.<timestamp>.bak`, written when a log's column layout changes
+between releases (gotcha #1) -- old data, still readable, safe to delete
+once you've pulled anything you want out of it.
