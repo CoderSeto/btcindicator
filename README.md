@@ -26,29 +26,34 @@ On Windows with more than one Python installed, go through the `py`
 launcher so you hit the interpreter that actually has these dependencies:
 `py -m pip install -r requirements.txt` then `py -m streamlit run app.py`.
 
-This opens a browser tab at `http://localhost:8501` on its own. From there:
+This opens a browser tab at `http://localhost:8501` on its own. The layout is
+built to fit one screen -- the live state is always visible, and the price
+chart is the one panel you scroll for:
 
-- **Top row** — current price, the composite signal (bullish/bearish/neutral
-  with how many indicators agree), and order-book imbalance.
-- **Kalshi 15m Fair Value** — near the top, since for a lot of people
-  this is the primary reason to have the dashboard open. See below for
-  what it does.
-- **Outlook** — a plain-language read on which way things are leaning and
-  why, plus a "reversal watch" callout when an RSI/price divergence pattern
-  is detected (see below), and historical hit-rate confidence once you've
-  run a backtest. This is commentary on the current pattern, not a forecast.
-- **Indicator badges** — each individual signal shown separately. 7 to
-  start, rising to 9 as the feeds warm up: `book_flow` appears once the
-  depth feeds have `BOOK_FLOW_WINDOW_SECONDS` of history (~1 min) and
-  `agg_delta` once the trade feeds have collected trades -- see below.
-- **Chart, Order Book Depth, Live Feeds, and Recent alerts** — collapsed by
-  default (click to expand) so the page stays scannable at a glance; open
-  whichever you need. The Order Book Depth panel is where the per-venue
-  books, resting-liquidity flow, and any walls that have held show up.
-- **Sidebar** — switch trading pair, adjust the refresh interval (as low
-  as 5s, useful for watching a Kalshi window's final minute), adjust how
-  many aligned indicators trigger an alert, and run a backtest — all
-  without touching code.
+- **Header strip** — price, the composite signal (bullish/bearish/neutral with
+  how many indicators agree), aggregated order-book imbalance, and the Kalshi
+  P(YES) for the tracked contract, as four compact cards.
+- **Signal row** — every indicator as a coloured dot. 7 to start, rising to 9
+  as the feeds warm up: `book_flow` appears once the depth feeds have
+  `BOOK_FLOW_WINDOW_SECONDS` of history (~1 min) and `agg_delta` once the
+  trade feeds have collected trades. Hover a dot for the full name and vote.
+- **Kalshi box** — strike, minutes remaining and auto-track, with P(YES),
+  P(NO) and the market's own quote right beneath them.
+- **Outlook box** — a plain-language read on which way things are leaning and
+  why, plus a "reversal watch" callout when an RSI/price divergence pattern is
+  detected. Commentary on the current pattern, not a forecast.
+- **Tabs** — Order Book, Feeds, Chart, Alerts, and Notes & limits. Order Book
+  opens by default because the chart is tall enough to push the page past a
+  screen; it's one click away when you want it.
+- **Sidebar** — switch trading pair, adjust the refresh interval (as low as
+  5s, useful for watching a Kalshi window's final minute), adjust how many
+  aligned indicators trigger an alert, and run a backtest — all without
+  touching code.
+
+The three boxes and the tab panel are fixed-height and scroll internally, so
+the page height doesn't move around as text wraps or as you switch tabs. If
+you have more vertical room than the ~900px this targets, raise `BOX_HEIGHT`
+and `TAB_BODY_HEIGHT` near the top of `app.py`.
 
 ## Option B: Console bot
 

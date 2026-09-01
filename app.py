@@ -31,6 +31,93 @@ st.set_page_config(page_title="BTC Indicator Bot", page_icon="\u20bf", layout="w
 
 PAIRS = ["BTC-USD", "ETH-USD", "SOL-USD", "BTC-EUR"]
 
+
+# --- Small rendering helpers ------------------------------------------------
+
+def _esc(text: str) -> str:
+    """
+    Escapes dollar signs for Streamlit's markdown.
+
+    Streamlit renders `$...$` as LaTeX math, so any caption carrying two
+    dollar amounts on one line -- "$100,008.85 vs strike $100,000.00" --
+    silently turns the text between them into italic gibberish rather than
+    erroring. Every interpolated money string that reaches st.markdown or
+    st.caption goes through this. Metric values are not markdown-rendered
+    and don't need it.
+    """
+    return text.replace("$", r"\$")
+
+
+def _venue_status(status: dict):
+    """
+    One compact row of connection dots. Both the depth feeds and the trade
+    feeds report status the same way, so they share this rather than keeping
+    two near-identical blocks that drift apart.
+    """
+    if not status:
+        st.caption("Connecting...")
+        return
+    cols = st.columns(len(status))
+    for col, (name, val) in zip(cols, status.items()):
+        with col:
+            icon = "\U0001F7E2" if val == "connected" else (
+                "\U0001F7E1" if val in ("connecting", "reconnecting", "syncing book")
+                else "\U0001F534")
+            st.markdown(
+                f"<div style='font-size:0.72rem;line-height:1.4;margin-bottom:0.3rem' "
+                f"title='{name}: {val}'>{icon} <b>{name}</b>"
+                f"<span style='opacity:0.5'> {val[:18]}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+
+def _strike_path_liquidity(book_snapshot, kalshi_result, cfg):
+    """
+    How much resting size sits between spot and the Kalshi strike, or None if
+    that can't be answered (no depth feed, or a strike further out than the
+    retained band).
+
+    Deliberately kept as a plain factual readout rather than anything that
+    feeds back into P(YES): this project's rule is that independently sourced
+    numbers don't get blended without validated evidence for the blending
+    method, and there is none here -- no historical order-book data exists to
+    calibrate what a given amount of resting size does to a crossing
+    probability.
+    """
+    if not (book_snapshot and book_snapshot.get("available") and kalshi_result.get("available")):
+        return None
+
+    venue_books = book_snapshot.get("books", {})
+    # Prefer Coinbase: it's the venue the price and the fair-value model both
+    # come from, and it's quoted in actual dollars rather than USDT.
+    venue = "coinbase" if "coinbase" in venue_books else next(iter(venue_books), None)
+    book = venue_books.get(venue) if venue else None
+    if not book:
+        return None
+
+    spot = kalshi_result["current_price"]
+    strike = kalshi_result["strike"]
+    if abs(strike - spot) / max(spot, 1) > cfg.BOOK_RETAIN_BPS / 10_000.0:
+        return None
+
+    side = "ask" if strike > spot else "bid"
+    low, high = min(spot, strike), max(spot, strike)
+    return {
+        "venue": venue,
+        "side": side,
+        "low": low,
+        "high": high,
+        "notional": orderbook.notional_between(book, spot, strike, side),
+        "direction_word": "up through" if strike > spot else "down through",
+        "settles": "YES" if strike > spot else "NO",
+        "walls": [
+            w for w in book_snapshot.get("walls", [])
+            if w.get("held") and w.get("venue") == venue and w["side"] == side
+            and low <= w["price"] <= high
+        ],
+    }
+
+
 # --- Sidebar controls ---
 st.sidebar.header("Settings")
 product_id = st.sidebar.selectbox(
@@ -117,7 +204,37 @@ if run_backtest_clicked:
 
 st_autorefresh(interval=refresh_seconds * 1000, key="autorefresh")
 
-st.title(f"\u20bf {product_id} Indicator Bot")
+# --- Compact layout styling -------------------------------------------------
+# Streamlit's defaults are generous with vertical space: a ~6rem top pad,
+# large metric type, wide gaps between blocks. On a dashboard whose whole job
+# is "see the current state at a glance" that costs a screenful of scrolling.
+# These rules tighten the spacing so the live state fits in one viewport. The
+# price chart is the deliberate exception -- it lives in a tab, where scrolling
+# is expected and fine.
+#
+# This hooks Streamlit's internal test IDs, which do change between releases.
+# A selector that stops matching simply does nothing: the layout still works,
+# it just gets roomier again. Nothing here is load-bearing.
+st.markdown(
+    """
+    <style>
+      /* Reclaim the default ~6rem top pad and the gaps between blocks. */
+      .block-container {padding-top: 2.4rem; padding-bottom: 0.8rem;}
+      [data-testid="stVerticalBlock"] {gap: 0.4rem;}
+      [data-testid="stHorizontalBlock"] {gap: 0.5rem;}
+      [data-testid="stVerticalBlockBorderWrapper"] {padding: 0.1rem 0.15rem;}
+      /* Metrics carry the headline numbers; the default type is oversized
+         for four of them in a row. */
+      [data-testid="stMetricValue"] {font-size: 1.35rem; line-height: 1.5rem;}
+      [data-testid="stMetricLabel"] p {font-size: 0.72rem;}
+      [data-testid="stMetricDelta"] {font-size: 0.7rem;}
+      [data-testid="stTabs"] button p {font-size: 0.8rem;}
+      h1, h2, h3, h4 {margin-bottom: 0.3rem; padding-top: 0.1rem;}
+      hr {margin: 0.35rem 0;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # --- Load data ---
 state = load_state(cfg, feed_snapshot=feed_snapshot, book_snapshot=book_snapshot)
@@ -127,88 +244,44 @@ if state.error:
     st.stop()
 
 df, imbalance, snapshot = state.df, state.imbalance, state.snapshot
+book_read = snapshot.book or {}
+outlook_result = state.outlook
 log_signal_snapshot(snapshot)
 alert_fired = snapshot.strength >= cfg.COMPOSITE_ALERT_THRESHOLD
 if alert_fired:
     log_alert(snapshot)
 
-# --- Top row: headline metrics ---
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric(product_id, f"${snapshot.price:,.2f}")
-    st.caption(f"Updated {datetime.now().strftime('%H:%M:%S')}")
-with col2:
-    emoji = {"bullish": "\U0001F7E2", "bearish": "\U0001F534", "neutral": "\u26aa"}[snapshot.composite]
-    st.metric("Composite signal", f"{emoji} {snapshot.composite.upper()}",
-              f"{snapshot.strength}/{len(snapshot.individual)} aligned")
-book_read = snapshot.book or {}
-with col3:
-    if book_read.get("available"):
-        held = book_read["persistence_seconds"]
-        direction = (
-            f"held {held:.0f}s \u00b7 {book_read['venue_count']} venues"
-            if book_read["persistence_direction"]
-            else f"{book_read['venue_count']} venues \u00b7 no held lean"
-        )
-        st.metric("Order book imbalance", f"{book_read['imbalance']:+.2f}", direction)
-    elif imbalance is None:
-        st.metric("Order book imbalance", "--", "waiting on depth feeds")
-    else:
-        direction = "buy pressure" if imbalance > 0.02 else "sell pressure" if imbalance < -0.02 else "balanced"
-        st.metric("Order book imbalance (1 venue)", f"{imbalance:+.2f}", direction)
-
-if alert_fired:
-    st.success(
-        f"\U0001F6A8 {snapshot.strength} indicators aligned {snapshot.composite.upper()} -- "
-        f"logged to {cfg.ALERT_LOG_PATH}"
-    )
-
-# --- Kalshi 15m fair-value calculator (moved up top -- primary use case) ---
-st.divider()
-st.subheader("\u23F1\uFE0F Kalshi 15m Fair Value")
-st.caption(
-    "Enter the strike and time remaining from the actual Kalshi contract you're looking at. "
-    "A genuinely different question from the Outlook below (probability for a specific "
-    "strike/time, not a directional lean)."
-)
-
-kalshi_col1, kalshi_col2, kalshi_col3 = st.columns([1, 1, 1])
-with kalshi_col3:
-    auto_track = st.checkbox("Auto-track current window", value=True)
+# --- Kalshi fair value, computed before anything renders --------------------
+# The headline strip shows P(YES) alongside price and the composite, but the
+# strike/minutes inputs live further down the page. Reading them from
+# session_state here rather than from the widgets lets the number appear at
+# the top while the controls stay next to the rest of the Kalshi block.
+# session_state already holds the current values at the start of a rerun, so
+# there's no one-frame lag: editing a strike reruns the script, and this
+# reads the new value before the widget is drawn again.
+auto_track = st.session_state.get("kalshi_auto_track", True)
 
 kalshi_live = None
 if auto_track:
     kalshi_live = kalshi_api.current_btc15m_market()
     if kalshi_live["available"]:
-        # Strike only resets when the window itself actually changes -- so
-        # a manual edit mid-window survives instead of being fought every
+        # Strike only resets when the window itself actually changes -- so a
+        # manual edit mid-window survives instead of being fought every
         # refresh. Minutes-remaining is a live countdown, so it always updates.
         if st.session_state.get("kalshi_last_ticker") != kalshi_live["ticker"]:
             st.session_state["kalshi_strike"] = kalshi_live["strike"]
             st.session_state["kalshi_last_ticker"] = kalshi_live["ticker"]
         st.session_state["kalshi_minutes"] = round(kalshi_live["minutes_remaining"], 2)
-    else:
-        st.caption(f"\u26A0\uFE0F Auto-track couldn't reach Kalshi ({kalshi_live['reason']}) -- using manual values below.")
 
 if "kalshi_strike" not in st.session_state:
     st.session_state["kalshi_strike"] = float(round(snapshot.price))
 if "kalshi_minutes" not in st.session_state:
     st.session_state["kalshi_minutes"] = round(kalshi.minutes_until_next_kalshi_close(), 1)
 
-with kalshi_col1:
-    kalshi_strike = st.number_input("Strike price ($)", min_value=0.0, step=10.0, key="kalshi_strike")
-with kalshi_col2:
-    kalshi_minutes = st.number_input("Minutes remaining", min_value=0.0, step=0.5, key="kalshi_minutes")
-
-if kalshi_live and kalshi_live["available"]:
-    quote_bits = [f"Tracking: `{kalshi_live['ticker']}`"]
-    if kalshi_live["yes_bid"] is not None and kalshi_live["yes_ask"] is not None:
-        quote_bits.append(
-            f"Kalshi YES quote: {kalshi_live['yes_bid'] * 100:.0f}\u00a2/{kalshi_live['yes_ask'] * 100:.0f}\u00a2"
-        )
-    st.caption(" \u00b7 ".join(quote_bits))
-
-kalshi_result = kalshi.fair_value(df, kalshi_strike, kalshi_minutes, cfg.KALSHI_VOL_LOOKBACK_MINUTES)
+kalshi_result = kalshi.fair_value(
+    df, st.session_state["kalshi_strike"], st.session_state["kalshi_minutes"],
+    cfg.KALSHI_VOL_LOOKBACK_MINUTES,
+)
 
 if kalshi_result["available"] and kalshi_live and kalshi_live["available"]:
     kalshi_tracking.log_prediction(
@@ -224,205 +297,224 @@ if kalshi_result["available"] and kalshi_live and kalshi_live["available"]:
         kalshi_last_price=kalshi_live["last_price"],
     )
 
-if not kalshi_result["available"]:
-    st.warning(f"Can't compute fair value: {kalshi_result['reason']}")
-else:
-    show_gap = bool(
-        kalshi_live and kalshi_live["available"]
-        and kalshi_live["yes_bid"] is not None and kalshi_live["yes_ask"] is not None
-    )
-    metric_cols = st.columns(4 if show_gap else 3)
-    with metric_cols[0]:
-        st.metric("P(YES / above strike)", f"{kalshi_result['p_yes'] * 100:.1f}%")
-    with metric_cols[1]:
-        st.metric("P(NO / below strike)", f"{kalshi_result['p_no'] * 100:.1f}%")
-    with metric_cols[2]:
-        st.metric("Annualized vol used", f"{kalshi_result['annual_vol'] * 100:.1f}%")
-    if show_gap:
-        kalshi_mid = (kalshi_live["yes_bid"] + kalshi_live["yes_ask"]) / 2
-        gap_pts = (kalshi_result["p_yes"] - kalshi_mid) * 100
-        with metric_cols[3]:
-            st.metric("Kalshi's own YES quote", f"{kalshi_mid * 100:.0f}\u00a2", f"{gap_pts:+.1f} pts vs model")
-        st.caption(
-            "The gap is model-vs-market, not a signal to act on -- it can reflect a real "
-            "mispricing, or just this model's own approximations (basis risk, settlement "
-            "averaging -- see below) being wrong instead. Worth understanding why before "
-            "trusting it."
-        )
+kalshi_quote = None
+if (kalshi_live and kalshi_live["available"]
+        and kalshi_live["yes_bid"] is not None and kalshi_live["yes_ask"] is not None):
+    kalshi_quote = (kalshi_live["yes_bid"] + kalshi_live["yes_ask"]) / 2
 
-    st.caption(
-        f"${kalshi_result['current_price']:,.2f} vs strike ${kalshi_result['strike']:,.2f} \u00b7 "
-        f"{kalshi_result['minutes_remaining']:.1f} min left \u00b7 "
-        f"std dev \u00b1${kalshi_result['price_std']:,.2f} "
-        f"({kalshi_result['vol_samples_used']}/{kalshi_result['vol_samples_requested']} vol samples)"
-    )
-
-    # Resting liquidity between spot and the strike. Deliberately NOT
-    # folded into P(YES) above: this project's rule is that independently
-    # sourced numbers don't get blended without validated evidence for the
-    # blending method, and there is none here -- no historical order-book
-    # data exists to calibrate what a given amount of resting size does to
-    # a crossing probability. So it's shown as what it is: a factual
-    # description of the path, next to an unchanged model number.
-    if book_snapshot and book_snapshot.get("available"):
-        venue_books = book_snapshot.get("books", {})
-        # Prefer Coinbase: it's the venue the price and the fair-value model
-        # both come from, and it's quoted in actual dollars rather than USDT.
-        path_venue = "coinbase" if "coinbase" in venue_books else next(iter(venue_books), None)
-        path_book = venue_books.get(path_venue) if path_venue else None
-        spot = kalshi_result["current_price"]
-        strike = kalshi_result["strike"]
-
-        if path_book and abs(strike - spot) / max(spot, 1) <= cfg.BOOK_RETAIN_BPS / 10_000.0:
-            side = "ask" if strike > spot else "bid"
-            path_notional = orderbook.notional_between(path_book, spot, strike, side)
-            walls_in_path = [
-                w for w in book_snapshot.get("walls", [])
-                if w.get("held") and w.get("venue") == path_venue and w["side"] == side
-                and min(spot, strike) <= w["price"] <= max(spot, strike)
-            ]
-            with st.expander("Resting liquidity between spot and the strike"):
-                direction_word = "up through" if strike > spot else "down through"
-                settles = "YES" if strike > spot else "NO"
-                st.markdown(
-                    f"**${path_notional:,.0f}** of resting {side}s sits between "
-                    f"${min(spot, strike):,.2f} and ${max(spot, strike):,.2f} on "
-                    f"{path_venue}. Price would have to trade {direction_word} that "
-                    f"to settle {settles}."
-                )
-                for wall in walls_in_path[:3]:
-                    st.caption(
-                        f"\u2022 ${wall['notional']:,.0f} concentrated at ${wall['price']:,.2f} "
-                        f"(held {wall['age_seconds']:.0f}s)"
-                    )
-                st.caption(
-                    "**This does not adjust the probability above, and shouldn't be read as if "
-                    "it did.** It's one venue's resting size at one instant. Resting size can be "
-                    "pulled the moment price approaches, it says nothing about how much "
-                    "aggressive flow is coming the other way, and there's no historical "
-                    "order-book data to calibrate what any of it is worth. Context, not an edge."
-                )
-
-    with st.expander("Compare against the bot's backtested signals"):
-        confidence_lines = state.outlook.get("confidence_lines")
-        if confidence_lines:
-            for line in confidence_lines:
-                st.info(f"\U0001F4CA {line}")
-            st.caption(
-                "A SEPARATE empirical read, not blended into the probability above -- only "
-                "genuinely comparable if BACKTEST_LOOKAHEAD_CANDLES is set to ~15 to match "
-                "this window."
-            )
-        else:
-            st.caption("No backtest yet -- run one from the sidebar first.")
-
-with st.expander("Kalshi model assumptions and limitations"):
+# --- Header strip -----------------------------------------------------------
+title_col, alert_col = st.columns([3, 2])
+with title_col:
     st.markdown(
-        "- **Basis risk:** uses Coinbase's price as a proxy for Kalshi's actual settlement "
-        "source (CF Benchmarks' multi-exchange Real-Time Index) -- these can diverge by a "
-        "few dollars, especially during a volatile close.\n"
-        "- **Settlement averaging:** Kalshi settles on a 60-second average of the reference "
-        "price at close, not a single tick. This model treats it as a single point-in-time "
-        "draw, which slightly overstates how extreme the probability gets in the final "
-        "minute or two.\n"
-        "- **No drift:** assumes a pure random walk (driftless geometric Brownian motion). "
-        "It deliberately ignores the bot's own directional signals below.\n"
-        "- **Not financial advice.** A calculator, not a guarantee."
+        f"#### \u20bf {product_id}"
+        f"<span style='font-weight:400;font-size:0.75rem;opacity:0.6'>"
+        f" &nbsp;·&nbsp; {datetime.now().strftime('%H:%M:%S')}"
+        f" &nbsp;·&nbsp; refresh {refresh_seconds}s</span>",
+        unsafe_allow_html=True,
     )
-st.divider()
-
-# --- Outlook ---
-st.subheader("Outlook")
-outlook_result = state.outlook
-lean_icon = {"bullish": "\U0001F4C8", "bearish": "\U0001F4C9", "neutral": "\u2696\ufe0f"}[snapshot.composite]
-st.markdown(f"{lean_icon} **{outlook_result['headline']}**")
-if outlook_result["detail"]:
-    st.write(outlook_result["detail"])
-if outlook_result["caution"]:
-    st.warning(outlook_result["caution"])
-if outlook_result.get("book_note"):
-    st.markdown(f"\U0001F9F1 {outlook_result['book_note']}")
-if outlook_result["weighted_line"]:
-    st.markdown(f"\u2696\ufe0f {outlook_result['weighted_line']}")
-    with st.expander("See per-indicator weights"):
-        breakdown = state.weighted.get("breakdown", {})
-        if breakdown:
-            weight_labels = {
-                "sma_cross": "SMA Cross", "ema_cross": "EMA Cross", "rsi": "RSI",
-                "macd": "MACD", "bollinger": "Bollinger", "volume": "Volume Spike",
-                "orderbook": "Order Book", "book_flow": "Book Flow",
-                "agg_delta": "Agg. Exchange Delta",
-            }
-            rows = [
-                {"Indicator": weight_labels.get(name, name), "Vote": v["vote"].upper(), "Weight": f"{v['weight']:.2f}"}
-                for name, v in breakdown.items()
-            ]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        st.caption(
-            "Weight 1.00 = counts the same as unweighted (no backtest data, or a coin-flip "
-            "historical hit rate). Above 1.00 = this indicator's calls have historically been "
-            "right more often; below 1.00 = less often. Order book, book flow and aggregated "
-            "exchange delta always show 1.00 -- no historical order-book data exists to "
-            "backtest the first two at all."
+with alert_col:
+    if alert_fired:
+        st.markdown(
+            f"<div style='text-align:right;padding-top:0.5rem;font-size:0.85rem'>"
+            f"\U0001F6A8 <b>{snapshot.strength} aligned {snapshot.composite.upper()}</b>"
+            f"<span style='opacity:0.6'> &nbsp;· logged to {cfg.ALERT_LOG_PATH}</span></div>",
+            unsafe_allow_html=True,
         )
-with st.expander("Backtested confidence for the raw composite", expanded=bool(outlook_result["confidence_lines"])):
-    if outlook_result["confidence_lines"]:
-        for line in outlook_result["confidence_lines"]:
-            st.info(f"\U0001F4CA {line}")
-    else:
-        st.caption("No backtest yet for this pair -- run one from the sidebar to see historical hit rates here.")
-st.caption(
-    "This reads the current pattern of indicators -- it's not a prediction and not financial advice. "
-    "Always do your own research."
-)
 
-# --- Indicator badges ---
-st.subheader("Indicators")
-labels = {
+emoji_map = {"bullish": "\U0001F7E2", "bearish": "\U0001F534", "neutral": "\u26aa"}
+
+head_cols = st.columns(4)
+with head_cols[0]:
+    with st.container(border=True):
+        st.metric(product_id, f"${snapshot.price:,.2f}")
+with head_cols[1]:
+    with st.container(border=True):
+        st.metric(
+            "Composite",
+            f"{emoji_map[snapshot.composite]} {snapshot.composite.upper()}",
+            f"{snapshot.strength}/{len(snapshot.individual)} aligned",
+        )
+with head_cols[2]:
+    with st.container(border=True):
+        if book_read.get("available"):
+            held = book_read["persistence_seconds"]
+            sub = (
+                f"held {held:.0f}s \u00b7 {book_read['venue_count']} venues"
+                if book_read["persistence_direction"]
+                else f"{book_read['venue_count']} venues \u00b7 no held lean"
+            )
+            st.metric("Order book", f"{book_read['imbalance']:+.2f}", sub,
+                      help="Notional depth within the configured band of mid, distance-weighted "
+                           "and averaged across venues. Only votes once a lean has held.")
+        elif imbalance is None:
+            st.metric("Order book", "--", "waiting on depth feeds")
+        else:
+            sub = ("buy pressure" if imbalance > 0.02
+                   else "sell pressure" if imbalance < -0.02 else "balanced")
+            st.metric("Order book (1 venue)", f"{imbalance:+.2f}", sub,
+                      help="Fallback reading: one Coinbase REST snapshot, unweighted base "
+                           "volume over a fixed level count. Not the same scale as the "
+                           "aggregated reading.")
+with head_cols[3]:
+    with st.container(border=True):
+        if not kalshi_result["available"]:
+            st.metric("Kalshi P(YES)", "--", kalshi_result["reason"][:38])
+        else:
+            gap = (f"{(kalshi_result['p_yes'] - kalshi_quote) * 100:+.0f} pts vs market"
+                   if kalshi_quote is not None else
+                   f"{kalshi_result['minutes_remaining']:.1f} min left")
+            st.metric("Kalshi P(YES)", f"{kalshi_result['p_yes'] * 100:.1f}%", gap,
+                      help="Model fair value for the strike below. Never blended with the "
+                           "bot's directional signals -- see the Notes tab.")
+
+# --- Signal badges ----------------------------------------------------------
+short_labels = {
+    "sma_cross": "SMA", "ema_cross": "EMA", "rsi": "RSI", "macd": "MACD",
+    "bollinger": "BOLL", "volume": "VOL", "orderbook": "BOOK",
+    "book_flow": "FLOW", "agg_delta": "DELTA",
+}
+long_labels = {
     "sma_cross": "SMA Cross", "ema_cross": "EMA Cross", "rsi": "RSI",
     "macd": "MACD", "bollinger": "Bollinger", "volume": "Volume Spike",
     "orderbook": "Order Book", "book_flow": "Book Flow",
     "agg_delta": "Agg. Exchange Delta",
 }
-emoji_map = {"bullish": "\U0001F7E2", "bearish": "\U0001F534", "neutral": "\u26aa"}
-badge_cols = st.columns(len(snapshot.individual))
-for col, (name, val) in zip(badge_cols, snapshot.individual.items()):
-    with col:
-        st.markdown(f"**{labels.get(name, name)}**")
-        st.markdown(f"{emoji_map[val]} {val.upper()}")
 
-# --- Chart (collapsed by default -- takes real space) ---
-with st.expander("Price Chart", expanded=False):
+with st.container(border=True):
+    badge_cols = st.columns(max(len(snapshot.individual), 1))
+    for col, (name, val) in zip(badge_cols, snapshot.individual.items()):
+        with col:
+            st.markdown(
+                f"<div style='text-align:center;line-height:1.25' "
+                f"title='{long_labels.get(name, name)}: {val}'>"
+                f"<span style='font-size:0.68rem;opacity:0.65'>{short_labels.get(name, name)}</span><br>"
+                f"<span style='font-size:0.95rem'>{emoji_map[val]}</span></div>",
+                unsafe_allow_html=True,
+            )
+    missing = [n for n in long_labels if n not in snapshot.individual]
+    if missing:
+        st.caption(
+            "Warming up: " + ", ".join(long_labels[n] for n in missing)
+            + " -- absent rather than voting neutral until their feeds have enough history."
+        )
+
+# The two mid-row boxes and the tab panel are all fixed-height scrollers, so
+# the page height is a constant rather than a function of how much the outlook
+# text happens to wrap or which tab is open. That is what makes "no page
+# scroll" hold in every state instead of only the tidy ones. Raise either if
+# you have the vertical room and would rather scroll the page than a box.
+BOX_HEIGHT = 205
+
+# --- Main body: Kalshi | Outlook --------------------------------------------
+left, right = st.columns(2)
+
+with left:
+    with st.container(border=True, height=BOX_HEIGHT):
+        st.markdown("**\u23F1\uFE0F Kalshi 15m fair value**")
+        k1, k2, k3 = st.columns([1, 1, 1])
+        with k1:
+            st.number_input("Strike ($)", min_value=0.0, step=10.0, key="kalshi_strike")
+        with k2:
+            st.number_input("Minutes left", min_value=0.0, step=0.5, key="kalshi_minutes")
+        with k3:
+            st.checkbox("Auto-track", key="kalshi_auto_track", value=True,
+                        help="Pulls the currently open KXBTC15M contract's strike and close "
+                             "time from Kalshi's public API each refresh.")
+
+        if auto_track and kalshi_live and not kalshi_live["available"]:
+            st.caption(f"\u26A0\uFE0F Auto-track couldn't reach Kalshi ({kalshi_live['reason']}) "
+                       "-- using the values above.")
+
+        if not kalshi_result["available"]:
+            st.warning(f"Can't compute fair value: {kalshi_result['reason']}")
+        else:
+            r1, r2, r3 = st.columns(3)
+            with r1:
+                st.metric("P(YES)", f"{kalshi_result['p_yes'] * 100:.1f}%")
+            with r2:
+                st.metric("P(NO)", f"{kalshi_result['p_no'] * 100:.1f}%")
+            with r3:
+                if kalshi_quote is not None:
+                    st.metric("Market YES", f"{kalshi_quote * 100:.0f}\u00a2",
+                              f"{(kalshi_result['p_yes'] - kalshi_quote) * 100:+.1f} pts")
+                else:
+                    st.metric("Ann. vol", f"{kalshi_result['annual_vol'] * 100:.1f}%")
+
+            bits = [
+                f"${kalshi_result['current_price']:,.2f} vs ${kalshi_result['strike']:,.2f}",
+                f"\u00b1${kalshi_result['price_std']:,.2f} sd",
+                f"vol {kalshi_result['annual_vol'] * 100:.0f}%",
+            ]
+            if kalshi_live and kalshi_live["available"]:
+                bits.append(f"`{kalshi_live['ticker']}`")
+            st.caption(_esc(" \u00b7 ".join(bits)))
+
+            path = _strike_path_liquidity(book_snapshot, kalshi_result, cfg)
+            if path:
+                st.caption(_esc(
+                    f"\U0001F9F1 **${path['notional']:,.0f}** of resting {path['side']}s between "
+                    f"spot and strike on {path['venue']} -- context only, deliberately **not** "
+                    f"folded into P(YES). See Notes."
+                ))
+
+with right:
+    with st.container(border=True, height=BOX_HEIGHT):
+        lean_icon = {"bullish": "\U0001F4C8", "bearish": "\U0001F4C9",
+                     "neutral": "\u2696\ufe0f"}[snapshot.composite]
+        st.markdown(f"**{lean_icon} {outlook_result['headline']}**")
+        if outlook_result["detail"]:
+            st.caption(outlook_result["detail"])
+        if outlook_result["caution"]:
+            st.warning(outlook_result["caution"], icon="\u26A0\uFE0F")
+        if outlook_result.get("book_note"):
+            st.caption(_esc(f"\U0001F9F1 {outlook_result['book_note']}"))
+        if outlook_result["weighted_line"]:
+            st.caption(f"\u2696\ufe0f {outlook_result['weighted_line']}")
+        st.caption(
+            "Commentary on the current indicator pattern, not a prediction and not financial "
+            "advice. Backtested hit rates are in the Notes tab."
+        )
+
+# --- Deep-dive tabs ---------------------------------------------------------
+# Tabs rather than stacked expanders: seven collapsed expanders still cost
+# seven rows of vertical space, and opening one pushes everything below it
+# down the page. A tab strip costs one row and swaps content in place.
+# Order Book leads deliberately: Streamlit opens the first tab by default,
+# and the chart is the one panel tall enough to push the page past a
+# viewport. Landing on it would mean the dashboard loads already scrolled,
+# which is the whole thing this layout is trying to avoid.
+# Sized so the whole page lands just under a 900px viewport -- the header,
+# badges, both boxes and a usable panel with no page scroll. Raise it if you
+# have the vertical room and would rather see more of a panel at once; the
+# only cost is scrolling the page.
+TAB_BODY_HEIGHT = 300
+
+tab_book, tab_feeds, tab_chart, tab_alerts, tab_notes = st.tabs(
+    ["\U0001F4D2 Order Book", "\U0001F4E1 Feeds", "\U0001F4C8 Chart",
+     "\U0001F514 Alerts", "\u2139\uFE0F Notes & limits"]
+)
+
+with tab_chart:
+    # The one panel deliberately allowed to overflow the fold. Everything else
+    # on the page is sized to fit a viewport; a price chart squeezed into
+    # 330px would be useless, so this is the scroll the layout budgets for.
     st.plotly_chart(build_figure(df, cfg), use_container_width=True)
 
-# --- Aggregated order book (collapsed by default) ---
-with st.expander("Order Book Depth (Coinbase / Binance.US / Bybit)", expanded=False):
+with tab_book, st.container(height=TAB_BODY_HEIGHT, border=False):
     if not cfg.ENABLE_BOOK_FEEDS:
         st.caption("Level-2 depth feeds are disabled (ENABLE_BOOK_FEEDS = False in config.py). "
-                    "The order-book signal falls back to a single Coinbase REST snapshot.")
+                   "The order-book signal falls back to a single Coinbase REST snapshot.")
     elif not book_snapshot:
         st.caption("Depth feeds not available for this pair.")
     elif not book_snapshot.get("available"):
         st.caption(f"Waiting on depth feeds -- {book_snapshot.get('reason', 'no book yet')}.")
-        status_cols = st.columns(max(len(book_snapshot.get("status", {})), 1))
-        for col, (name, val) in zip(status_cols, book_snapshot.get("status", {}).items()):
-            with col:
-                icon = "\U0001F7E2" if val == "connected" else (
-                    "\U0001F7E1" if val in ("connecting", "reconnecting", "syncing book") else "\U0001F534")
-                st.markdown(f"{icon} **{name}**")
-                st.caption(val)
+        _venue_status(book_snapshot.get("status", {}))
     else:
         agg = book_snapshot["aggregate"]
         persistence = book_snapshot["persistence"]
         flow = book_snapshot["flow"]
 
-        status_cols = st.columns(max(len(book_snapshot["status"]), 1))
-        for col, (name, val) in zip(status_cols, book_snapshot["status"].items()):
-            with col:
-                icon = "\U0001F7E2" if val == "connected" else (
-                    "\U0001F7E1" if val in ("connecting", "reconnecting", "syncing book") else "\U0001F534")
-                st.markdown(f"{icon} **{name}**")
-                st.caption(val)
+        _venue_status(book_snapshot["status"])
 
         book_cols = st.columns(4)
         with book_cols[0]:
@@ -432,8 +524,7 @@ with st.expander("Order Book Depth (Coinbase / Binance.US / Bybit)", expanded=Fa
             st.metric("Venue agreement", f"{agg['agreement'] * 100:.0f}%",
                       f"{agg['venue_count']} venue(s) in aggregate")
         with book_cols[2]:
-            st.metric("Held for",
-                      f"{persistence['seconds']:.0f}s",
+            st.metric("Held for", f"{persistence['seconds']:.0f}s",
                       persistence["direction"] or "no lean past threshold")
         with book_cols[3]:
             if flow.get("available"):
@@ -464,13 +555,7 @@ with st.expander("Order Book Depth (Coinbase / Binance.US / Bybit)", expanded=Fa
         if venue_rows:
             st.dataframe(pd.DataFrame(venue_rows), use_container_width=True, hide_index=True)
         for venue, reason in (agg.get("excluded") or {}).items():
-            st.caption(f"\u26A0\uFE0F {venue} excluded from the aggregate: {reason}")
-        st.caption(
-            "Per-venue imbalances are averaged rather than the books being merged: Coinbase "
-            "quotes BTC-USD while the others quote BTCUSDT, and pooling those price levels "
-            "would build a book with a fictional mid. Each venue's imbalance is measured "
-            "against its own mid, so the ratios stay comparable whatever the basis is doing."
-        )
+            st.caption(f"⚠️ {venue} excluded from the aggregate: {reason}")
 
         held_walls = [w for w in book_snapshot["walls"] if w["held"]]
         if held_walls:
@@ -488,61 +573,44 @@ with st.expander("Order Book Depth (Coinbase / Binance.US / Bybit)", expanded=Fa
                 for w in held_walls[:8]
             ]
             st.dataframe(pd.DataFrame(wall_rows), use_container_width=True, hide_index=True)
-            st.caption(
-                f"Only walls present for at least {cfg.BOOK_WALL_MIN_AGE_SECONDS:.0f}s are listed. "
-                "A large level that appears and vanishes as price approaches is "
-                "indistinguishable from a spoof, and age is the only evidence available "
-                "either way. Even a wall that has held can still be pulled."
-            )
         else:
             st.caption("No resting walls have held long enough to report.")
 
         st.caption(
-            "\u26A0\uFE0F Neither the order-book signal nor book flow can be backtested. No exchange "
-            "publishes historical level-2 snapshots, so unlike the candle indicators there is no "
-            "hit rate behind either of them -- they always carry weight 1.00 in weighted "
-            "conviction, and nothing here is a measured edge."
+            f"Only walls present for at least {cfg.BOOK_WALL_MIN_AGE_SECONDS:.0f}s are listed, and "
+            "even those can still be pulled. Per-venue imbalances are averaged rather than the "
+            "books being merged -- see the Notes tab for why, and for what these signals can and "
+            "can't tell you."
         )
 
-# --- Live multi-exchange feeds (collapsed by default) ---
-with st.expander("Live Feeds (Coinbase / Binance.US / Bybit)", expanded=False):
+with tab_feeds, st.container(height=TAB_BODY_HEIGHT, border=False):
     if not cfg.ENABLE_EXCHANGE_FEEDS:
         st.caption("Multi-exchange feeds are disabled (ENABLE_EXCHANGE_FEEDS = False in config.py).")
     elif feed_snapshot is None:
         st.caption("Feeds not available for this pair.")
     else:
-        status = feed_snapshot["status"]
-        status_icon = {"connected": "\U0001F7E2"}
-        status_cols = st.columns(max(len(status), 1))
-        if status:
-            for col, (name, val) in zip(status_cols, status.items()):
-                with col:
-                    icon = status_icon.get(val, "\U0001F7E1" if val in ("connecting", "reconnecting") else "\U0001F534")
-                    st.markdown(f"**{name}**")
-                    st.markdown(f"{icon} {val}")
-        else:
-            st.caption("Connecting...")
+        _venue_status(feed_snapshot["status"])
 
         wc1, wc2, wc3 = st.columns(3)
         with wc1:
-            st.metric(f"Buy volume ({feed_snapshot['window_seconds']}s)", f"${feed_snapshot['buy_notional']:,.0f}")
+            st.metric(f"Buy volume ({feed_snapshot['window_seconds']}s)",
+                      f"${feed_snapshot['buy_notional']:,.0f}")
         with wc2:
-            st.metric(f"Sell volume ({feed_snapshot['window_seconds']}s)", f"${feed_snapshot['sell_notional']:,.0f}")
+            st.metric(f"Sell volume ({feed_snapshot['window_seconds']}s)",
+                      f"${feed_snapshot['sell_notional']:,.0f}")
         with wc3:
             st.metric("Aggregated delta", f"{feed_snapshot['delta_ratio']:+.2f}")
 
         whale_col, liq_col = st.columns(2)
         with whale_col:
-            st.markdown(f"**Recent whale trades** (\u2265 ${cfg.WHALE_TRADE_USD_THRESHOLD:,.0f})")
+            st.markdown(_esc(f"**Recent whale trades** (≥ ${cfg.WHALE_TRADE_USD_THRESHOLD:,.0f})"))
             whales = feed_snapshot["whale_events"]
             if whales:
                 whale_df = pd.DataFrame(whales[::-1][:15])
                 whale_df["time"] = pd.to_datetime(whale_df["time"], unit="s").dt.strftime("%H:%M:%S")
                 whale_df["notional"] = whale_df["notional"].map(lambda v: f"${v:,.0f}")
-                st.dataframe(
-                    whale_df[["time", "exchange", "side", "notional", "price"]],
-                    use_container_width=True, hide_index=True,
-                )
+                st.dataframe(whale_df[["time", "exchange", "side", "notional", "price"]],
+                             use_container_width=True, hide_index=True)
             else:
                 st.caption("None yet this session.")
         with liq_col:
@@ -552,10 +620,8 @@ with st.expander("Live Feeds (Coinbase / Binance.US / Bybit)", expanded=False):
                 liq_df = pd.DataFrame(liqs[::-1][:15])
                 liq_df["time"] = pd.to_datetime(liq_df["time"], unit="s").dt.strftime("%H:%M:%S")
                 liq_df["notional"] = liq_df["notional"].map(lambda v: f"${v:,.0f}")
-                st.dataframe(
-                    liq_df[["time", "exchange", "liquidated_side", "notional", "price"]],
-                    use_container_width=True, hide_index=True,
-                )
+                st.dataframe(liq_df[["time", "exchange", "liquidated_side", "notional", "price"]],
+                             use_container_width=True, hide_index=True)
             else:
                 st.caption("None yet this session.")
 
@@ -564,8 +630,7 @@ with st.expander("Live Feeds (Coinbase / Binance.US / Bybit)", expanded=False):
             "USDT-perpetual futures (not spot) -- Coinbase spot has no liquidations."
         )
 
-# --- Alert log (collapsed by default) ---
-with st.expander("Recent alerts", expanded=False):
+with tab_alerts, st.container(height=TAB_BODY_HEIGHT, border=False):
     if os.path.isfile(cfg.ALERT_LOG_PATH):
         try:
             log_df = pd.read_csv(cfg.ALERT_LOG_PATH)
@@ -580,3 +645,83 @@ with st.expander("Recent alerts", expanded=False):
             st.dataframe(log_df.tail(25).iloc[::-1], use_container_width=True, hide_index=True)
     else:
         st.caption("No alerts logged yet -- they'll show up here once enough indicators align.")
+
+with tab_notes, st.container(height=TAB_BODY_HEIGHT, border=False):
+    note_left, note_right = st.columns(2)
+
+    with note_left:
+        st.markdown("**Kalshi model assumptions**")
+        st.caption(
+            "- **Basis risk:** uses Coinbase's price as a proxy for Kalshi's actual settlement "
+            "source (CF Benchmarks' multi-exchange Real-Time Index) -- these can diverge by a "
+            "few dollars, especially during a volatile close.\n"
+            "- **Settlement averaging:** Kalshi settles on a 60-second average of the reference "
+            "price at close, not a single tick. This model treats it as a single point-in-time "
+            "draw, which slightly overstates how extreme the probability gets in the final "
+            "minute or two.\n"
+            "- **No drift:** assumes a pure random walk (driftless geometric Brownian motion). "
+            "It deliberately ignores the bot's own directional signals.\n"
+            "- **Not financial advice.** A calculator, not a guarantee."
+        )
+
+        if kalshi_quote is not None and kalshi_result["available"]:
+            st.caption(
+                "**On the model-vs-market gap:** it can reflect a real mispricing, or just this "
+                "model's own approximations above being wrong instead. Worth understanding why "
+                "before trusting it."
+            )
+
+        path = _strike_path_liquidity(book_snapshot, kalshi_result, cfg)
+        if path:
+            st.markdown("**Resting liquidity between spot and the strike**")
+            st.caption(_esc(
+                f"${path['notional']:,.0f} of resting {path['side']}s sits between "
+                f"${path['low']:,.2f} and ${path['high']:,.2f} on {path['venue']}. Price would "
+                f"have to trade {path['direction_word']} that to settle {path['settles']}."
+            ))
+            for wall in path["walls"][:3]:
+                st.caption(_esc(
+                    f"• ${wall['notional']:,.0f} concentrated at ${wall['price']:,.2f} "
+                    f"(held {wall['age_seconds']:.0f}s)"))
+            st.caption(
+                "**This does not adjust P(YES), and shouldn't be read as if it did.** It's one "
+                "venue's resting size at one instant. Resting size can be pulled the moment price "
+                "approaches, it says nothing about how much aggressive flow is coming the other "
+                "way, and there's no historical order-book data to calibrate what any of it is "
+                "worth. Context, not an edge."
+            )
+
+    with note_right:
+        st.markdown("**Order-book signals have no backtest**")
+        st.caption(
+            "⚠️ Neither the order-book signal nor book flow can be backtested. No exchange "
+            "publishes historical level-2 snapshots, so unlike the candle indicators there is no "
+            "hit rate behind either of them -- they always carry weight 1.00 in weighted "
+            "conviction, and nothing there is a measured edge. It is a better-constructed "
+            "*description* of the book, which is not the same claim."
+        )
+        st.caption(
+            "**Why venues are averaged, not merged:** Coinbase quotes BTC-USD while Binance.US "
+            "and Bybit quote BTCUSDT. USDT is not a dollar and the basis drifts by tens of basis "
+            "points, so pooling those price levels would build a book with a fictional mid. Each "
+            "venue's imbalance is measured against its own mid, so the ratios stay comparable "
+            "whatever the basis is doing."
+        )
+
+        st.markdown("**Per-indicator weights**")
+        breakdown = state.weighted.get("breakdown", {})
+        if breakdown:
+            rows = [
+                {"Indicator": long_labels.get(name, name), "Vote": v["vote"].upper(),
+                 "Weight": f"{v['weight']:.2f}"}
+                for name, v in breakdown.items()
+            ]
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Nothing directional to weigh right now.")
+        st.caption(
+            "Weight 1.00 = counts the same as unweighted (no backtest data, or a coin-flip "
+            "historical hit rate). Above 1.00 = this indicator's calls have historically been "
+            "right more often; below 1.00 = less often. Order book, book flow and aggregated "
+            "exchange delta always show 1.00."
+        )
