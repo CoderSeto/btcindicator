@@ -22,6 +22,8 @@ kalshi_predictions.csv
 kalshi_outcomes_cache.json
 # Older-layout logs rotated aside when a column is added (see CLAUDE.md gotcha #1)
 *.csv.*.bak
+# A log's append lock; only left behind if a writer died mid-append (cleared automatically)
+*.csv.lock
 
 # Test artifacts
 .pytest_cache/

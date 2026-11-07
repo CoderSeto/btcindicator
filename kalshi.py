@@ -2,11 +2,12 @@
 Fair-value calculator for Kalshi's KXBTC15M-style binary BTC contracts:
 "will price be above strike K at expiry".
 
-Uses the standard lognormal/geometric-Brownian-motion crossing probability
--- the same math underlying the N(d2) term in Black-Scholes -- given
-current price, strike, time remaining, and recent realized volatility.
-This is the textbook "fair" risk-neutral probability the contract
-resolves YES, assuming no drift (a pure random walk) and no jumps.
+Prices what the contract actually settles on -- the simple average of the
+60 one-second index prints before close, compared with the strike -- under
+driftless geometric Brownian motion, given current price, strike, time
+remaining and recent realized volatility (settlement_probability). The
+textbook point-in-time version, the N(d2) term from Black-Scholes, is kept
+as crossing_probability and reported alongside for comparison.
 
 This answers a genuinely different question than the rest of this bot.
 Everything else here answers "is price leaning up or down" -- Kalshi's
@@ -21,13 +22,16 @@ Known limitations, stated plainly rather than glossed over:
     current price input, which can diverge from the actual settlement
     source by a few dollars, especially during a volatile close. On a
     contract decided by a small margin, that gap matters.
-  - Settlement is actually a 60-SECOND AVERAGE of the reference index at
-    the window's close, not a single point-in-time price. This model
-    treats it as a single point-in-time draw -- a reasonable
-    approximation for most of the window, but it overstates how extreme
-    the true probability gets in the final minute or two (the real
-    distribution has slightly lower variance near expiry than modeled
-    here, since averaging smooths out some of the terminal noise).
+  - Settlement is a 60-SECOND AVERAGE of the reference index at the
+    window's close, and P(YES) models that average. Averaging lowers the
+    variance (to sigma^2 * (T - ~39.5s) instead of sigma^2 * T), so it is
+    always at least as far from 50% as the point-in-time N(d2): under a
+    point apart at 14 minutes, ~13 points at 1 minute with spot 5bp above
+    the strike (79% point-in-time vs 92% averaged). What remains
+    approximate is the FINAL MINUTE: some of the 60 prints have already
+    been taken, their real values aren't available here, and they're
+    assumed equal to the current price. Treat P(YES) inside the last
+    minute as rough.
   - Assumes driftless geometric Brownian motion (no jumps, no trend) --
     a standard simplifying assumption for pricing this kind of contract,
     not a claim that BTC actually moves this way. It deliberately ignores
@@ -49,10 +53,14 @@ from datetime import datetime, timezone
 import pandas as pd
 
 
-def realized_volatility(df: pd.DataFrame, lookback_minutes: int) -> dict:
+def realized_volatility(df: pd.DataFrame, lookback_minutes: int, candle_seconds: int = 60) -> dict:
     """
     Annualized realized volatility from close-to-close log returns over
-    the last `lookback_minutes` of 1-minute candle data.
+    the last `lookback_minutes` of candle data whose candles are
+    `candle_seconds` long. The candle size matters twice: it sets how many
+    candles cover the lookback, and how many such periods make a year.
+    Annualizing 5-minute returns as if they were 1-minute returns
+    overstates vol by sqrt(5).
 
     Returns {"annual_vol": float, "samples_used": int, "samples_requested": int}
     or {"annual_vol": None, "reason": str} if there isn't enough data or
@@ -61,7 +69,8 @@ def realized_volatility(df: pd.DataFrame, lookback_minutes: int) -> dict:
     data was actually available than asked for, rather than silently
     computing a shorter-than-intended window.
     """
-    recent = df.tail(lookback_minutes + 1)
+    lookback_candles = max(int(math.ceil(lookback_minutes * 60 / candle_seconds)), 1)
+    recent = df.tail(lookback_candles + 1)
     if len(recent) < 3:
         return {"annual_vol": None, "reason": "Not enough candle history to estimate volatility."}
 
@@ -77,17 +86,17 @@ def realized_volatility(df: pd.DataFrame, lookback_minutes: int) -> dict:
 
     mean_r = sum(log_returns) / samples_used
     variance = sum((r - mean_r) ** 2 for r in log_returns) / (samples_used - 1)
-    per_minute_std = math.sqrt(variance)
-    if per_minute_std <= 0:
+    per_candle_std = math.sqrt(variance)
+    if per_candle_std <= 0:
         return {"annual_vol": None, "reason": "Price didn't move at all in this window -- can't estimate volatility."}
 
-    minutes_per_year = 365.25 * 24 * 60
-    annual_vol = per_minute_std * math.sqrt(minutes_per_year)
+    candles_per_year = 365.25 * 24 * 60 * 60 / candle_seconds
+    annual_vol = per_candle_std * math.sqrt(candles_per_year)
 
     return {
         "annual_vol": annual_vol,
         "samples_used": samples_used,
-        "samples_requested": lookback_minutes,
+        "samples_requested": lookback_candles,
     }
 
 
@@ -105,18 +114,14 @@ def crossing_probability(current_price: float, strike: float, minutes_remaining:
 
     Explicitly handles minutes_remaining <= 0 (avoids a division by zero):
     with no time left, the outcome is already decided by where price sits
-    relative to the strike right now.
+    relative to the strike right now. KXBTC15M is "greater_or_equal", so
+    finishing exactly on the strike is YES.
     """
     if current_price <= 0 or strike <= 0:
         raise ValueError("current_price and strike must be positive")
 
     if minutes_remaining <= 0:
-        if current_price > strike:
-            return 1.0
-        elif current_price < strike:
-            return 0.0
-        else:
-            return 0.5
+        return 1.0 if current_price >= strike else 0.0
 
     if annual_vol is None or annual_vol <= 0:
         raise ValueError("annual_vol must be a positive number")
@@ -128,7 +133,75 @@ def crossing_probability(current_price: float, strike: float, minutes_remaining:
     return _norm_cdf(d2)
 
 
-def fair_value(df: pd.DataFrame, strike: float, minutes_remaining: float, lookback_minutes: int) -> dict:
+SETTLEMENT_PRINTS = 60          # KXBTC15M: simple average of 60 BRTI prints...
+SETTLEMENT_PRINT_SECONDS = 1.0  # ...one per second, the last one at close
+
+
+def settlement_variance_seconds(seconds_remaining: float,
+                                prints: int = SETTLEMENT_PRINTS,
+                                spacing: float = SETTLEMENT_PRINT_SECONDS) -> float:
+    """
+    Variance, in seconds of Brownian time, of the settlement average
+    (1/m) * sum W(u_k) over the m prints at u_k = T - (m - k) * spacing,
+    k = 1..m, seen from now (W(0) = 0 known).
+
+    Only prints still in the future are random. For those, sorted ascending
+    as u_1 < ... < u_f, the i-th one is the minimum in 2(f - i) + 1 of the
+    pairs in sum_{j,k} min(u_j, u_k), so
+
+        var = (1/m^2) * sum_i u_i * (2(f - i) + 1)
+
+    With every print still ahead this is (T - m*spacing) + spacing*(m+1)(2m+1)/(6m):
+    for the 60 one-second prints, T minus ~39.5 seconds. Prints already taken
+    contribute nothing here (see settlement_probability for how their level
+    is treated).
+    """
+    future = sorted(u for u in (seconds_remaining - (prints - k) * spacing for k in range(1, prints + 1))
+                    if u > 0)
+    f = len(future)
+    return sum(u * (2 * (f - i) + 1) for i, u in enumerate(future, start=1)) / prints ** 2
+
+
+def settlement_probability(current_price: float, strike: float, minutes_remaining: float,
+                           annual_vol: float) -> float:
+    """
+    P(YES) for what KXBTC15M actually settles on: YES iff the simple average of
+    the 60 one-second BRTI prints before close is >= the strike
+    (rules_primary; strike_type "greater_or_equal").
+
+    Driftless GBM, so every print is a martingale and the average's mean is
+    the current price. Its log is treated as normal with variance
+    sigma^2 * settlement_variance_seconds(T) -- a moment-matched lognormal,
+    which at these variances (~1e-5) is indistinguishable from the exact
+    distribution (checked against a second-by-second Monte Carlo of the rule
+    in tests/test_kalshi.py).
+
+    Versus crossing_probability(), the point-in-time N(d2): the average has
+    less variance than the last print, so this is always at least as far from
+    50% -- about a point at 14 minutes, ~13 points at 1 minute with spot 5bp
+    above the strike.
+
+    Limitation, stated in the output too: inside the final minute some prints
+    have already been taken. Their actual BRTI values aren't available here,
+    so they're taken to equal the current price.
+    """
+    if current_price <= 0 or strike <= 0:
+        raise ValueError("current_price and strike must be positive")
+    if minutes_remaining <= 0:
+        return 1.0 if current_price >= strike else 0.0
+    if annual_vol is None or annual_vol <= 0:
+        raise ValueError("annual_vol must be a positive number")
+
+    seconds_per_year = 365.25 * 24 * 60 * 60
+    var = annual_vol ** 2 * settlement_variance_seconds(minutes_remaining * 60.0) / seconds_per_year
+    if var <= 0:
+        return 1.0 if current_price >= strike else 0.0
+    d = (math.log(current_price / strike) - 0.5 * var) / math.sqrt(var)
+    return _norm_cdf(d)
+
+
+def fair_value(df: pd.DataFrame, strike: float, minutes_remaining: float, lookback_minutes: int,
+               candle_seconds: int = 60) -> dict:
     """
     Convenience wrapper: pulls current price from the latest candle close,
     computes realized volatility over lookback_minutes, and returns the
@@ -144,16 +217,18 @@ def fair_value(df: pd.DataFrame, strike: float, minutes_remaining: float, lookba
         return {"available": False, "reason": "Strike must be a positive price."}
 
     current_price = float(df["close"].iloc[-1])
-    vol_result = realized_volatility(df, lookback_minutes)
+    vol_result = realized_volatility(df, lookback_minutes, candle_seconds)
     if vol_result["annual_vol"] is None:
         return {"available": False, "reason": vol_result["reason"]}
 
     annual_vol = vol_result["annual_vol"]
-    p_yes = crossing_probability(current_price, strike, minutes_remaining, annual_vol)
+    p_yes = settlement_probability(current_price, strike, minutes_remaining, annual_vol)
+    p_yes_point = crossing_probability(current_price, strike, minutes_remaining, annual_vol)
 
-    minutes_per_year = 365.25 * 24 * 60
-    tau = max(minutes_remaining, 0) / minutes_per_year
-    price_std = current_price * annual_vol * math.sqrt(tau) if tau > 0 else 0.0
+    # Standard deviation of the settlement average, not of the last print.
+    seconds_per_year = 365.25 * 24 * 60 * 60
+    var = settlement_variance_seconds(max(minutes_remaining, 0) * 60.0) / seconds_per_year
+    price_std = current_price * annual_vol * math.sqrt(var) if var > 0 else 0.0
 
     return {
         "available": True,
@@ -166,6 +241,10 @@ def fair_value(df: pd.DataFrame, strike: float, minutes_remaining: float, lookba
         "price_std": price_std,
         "p_yes": p_yes,
         "p_no": 1.0 - p_yes,
+        # The point-in-time N(d2), kept for comparison and logged alongside so
+        # calibration can show whether modelling the average actually helped.
+        "p_yes_point": p_yes_point,
+        "final_minute": 0 < minutes_remaining < SETTLEMENT_PRINTS * SETTLEMENT_PRINT_SECONDS / 60.0,
     }
 
 
@@ -210,7 +289,7 @@ if __name__ == "__main__":
     print(f"Fetching recent {cfg.PRODUCT_ID} price history...")
     df = data_fetch.get_candles(cfg.PRODUCT_ID, cfg.GRANULARITY, max(cfg.CANDLE_HISTORY, lookback + 10))
 
-    result = fair_value(df, args.strike, minutes_remaining, lookback)
+    result = fair_value(df, args.strike, minutes_remaining, lookback, candle_seconds=cfg.GRANULARITY)
     if not result["available"]:
         print(f"[error] {result['reason']}")
     else:
@@ -219,12 +298,13 @@ if __name__ == "__main__":
         print(f"Minutes remaining:   {result['minutes_remaining']:.1f}")
         print(f"Annualized vol:      {result['annual_vol'] * 100:.1f}%  "
               f"(from {result['vol_samples_used']} of {result['vol_samples_requested']} requested samples)")
-        print(f"Est. price std dev:  ${result['price_std']:,.2f}")
-        print(f"\nFair value P(YES / above strike): {result['p_yes'] * 100:.1f}%")
+        print(f"Settlement-avg sd:   ${result['price_std']:,.2f}")
+        print(f"\nFair value P(YES / above strike): {result['p_yes'] * 100:.1f}%  "
+              f"(point-in-time N(d2), ignoring the averaging: {result['p_yes_point'] * 100:.1f}%)")
         print(f"Fair value P(NO / below strike):  {result['p_no'] * 100:.1f}%")
         print(
             "\n(Model-only estimate: Coinbase price used as a proxy for Kalshi's actual "
-            "multi-exchange\nsettlement source; assumes driftless GBM; ignores the final "
-            "60-second settlement averaging.\nSee README for full limitations. Not "
-            "financial advice.)"
+            "multi-exchange\nsettlement source; assumes driftless GBM; prices the 60-second "
+            "settlement average, but inside the\nfinal minute takes the already-elapsed prints "
+            "at the current price. See README for full\nlimitations. Not financial advice.)"
         )

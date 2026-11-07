@@ -12,6 +12,7 @@ import csv
 import os
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 import requests
 
@@ -26,6 +27,7 @@ import orderbook_feeds
 import outlook
 import signals
 import weighting
+from csv_utils import append_row
 
 
 # Fixed column order for both alert and signal logs, independent of which
@@ -75,52 +77,77 @@ def _book_log_values(snapshot: signals.SignalSnapshot) -> list:
     ]
 
 
-def _needs_header(path: str, header: list) -> bool:
-    """
-    Returns True if `header` still has to be written to `path`.
+def _now() -> datetime:
+    """The logs' clock (a function so tests can move it)."""
+    return datetime.now(timezone.utc)
 
-    If the file exists but its header doesn't match -- which happens when a
-    new indicator or column is added to a log that already has rows in it --
-    the old file is renamed aside and a fresh one is started. Appending
-    wider rows under a narrower header is exactly the failure that broke
-    pd.read_csv() here once before (see CLAUDE.md, gotcha #1); rotating
-    keeps every file internally consistent, and keeps the old data
-    readable, instead of corrupting both.
+
+def _last_row(path: str, header: list) -> Optional[dict]:
     """
-    if not os.path.isfile(path):
-        return True
+    The last data row of a log as {column: text}, or None if there isn't one
+    (missing file, header only, or a last line that doesn't fit the header).
+    Reads only the file's tail, so it stays cheap however long the log gets.
+    """
     try:
-        with open(path, newline="") as f:
-            existing = next(csv.reader(f), None)
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 16_384))
+            tail = f.read().decode("utf-8", errors="replace")
     except OSError:
-        return True
-    if existing == header:
-        return False
+        return None
+    lines = [line for line in tail.splitlines() if line.strip()]
+    if not lines:
+        return None
+    values = next(csv.reader([lines[-1]]))
+    if values == header or len(values) != len(header):
+        return None
+    return dict(zip(header, values))
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    archived = f"{path}.{stamp}.bak"
-    os.rename(path, archived)
-    print(f"[log] {path} had an older column layout -- moved it to {archived} and started a new file.")
-    return True
+
+def _is_repeat(path: str, header: list, row: list, same_fields=()) -> bool:
+    """
+    True if the log's last row is less than LOG_MIN_INTERVAL_SECONDS old and
+    matches `row` on every field in `same_fields` -- i.e. this would be the
+    same observation logged again by another rerun, tab or process.
+    """
+    if cfg.LOG_MIN_INTERVAL_SECONDS <= 0:
+        return False
+    last = _last_row(path, header)
+    if last is None:
+        return False
+    try:
+        age = (_now() - datetime.fromisoformat(last["timestamp"])).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not 0 <= age < cfg.LOG_MIN_INTERVAL_SECONDS:
+        return False
+    new = dict(zip(header, row))
+    return all(last[f] == str(new[f]) for f in same_fields)
 
 
 def log_alert(snapshot: signals.SignalSnapshot):
-    needs_header = _needs_header(cfg.ALERT_LOG_PATH, ALERT_LOG_HEADER)
-    with open(cfg.ALERT_LOG_PATH, "a", newline="") as f:
-        writer = csv.writer(f)
-        if needs_header:
-            writer.writerow(ALERT_LOG_HEADER)
-        writer.writerow(
-            [
-                datetime.now(timezone.utc).isoformat(),
-                snapshot.price,
-                snapshot.composite,
-                snapshot.strength,
-                round(snapshot.imbalance, 3) if snapshot.imbalance is not None else "",
-            ]
-            + _book_log_values(snapshot)
-            + [snapshot.individual.get(name, "") for name in ALL_SIGNAL_NAMES]
-        )
+    """
+    Appends one alert row -- unless the log's last row is the same alert
+    (direction and strength) from less than LOG_MIN_INTERVAL_SECONDS ago,
+    which is a rerun or another tab/process seeing the same thing.
+    """
+    row = (
+        [
+            _now().isoformat(),
+            snapshot.price,
+            snapshot.composite,
+            snapshot.strength,
+            round(snapshot.imbalance, 3) if snapshot.imbalance is not None else "",
+        ]
+        + _book_log_values(snapshot)
+        + [snapshot.individual.get(name, "") for name in ALL_SIGNAL_NAMES]
+    )
+    # append_row checks for a repeat under its file lock, so two writers can't
+    # both decide the row is new.
+    append_row(cfg.ALERT_LOG_PATH, ALERT_LOG_HEADER, row,
+               skip_if=lambda: _is_repeat(cfg.ALERT_LOG_PATH, ALERT_LOG_HEADER, row,
+                                          same_fields=("composite", "strength")))
 
 
 def log_signal_snapshot(snapshot: signals.SignalSnapshot):
@@ -131,26 +158,24 @@ def log_signal_snapshot(snapshot: signals.SignalSnapshot):
     continuously-growing file). Used by analyze_correlation.py.
     Any indicator missing from this cycle's snapshot (most commonly
     agg_delta or book_flow, before the feeds have warmed up) is logged as
-    an empty cell.
+    an empty cell. At most one row per LOG_MIN_INTERVAL_SECONDS, so the row
+    count measures observations rather than dashboard reruns.
     """
     if not cfg.LOG_ALL_SIGNALS:
         return
-    needs_header = _needs_header(cfg.SIGNAL_LOG_PATH, SIGNAL_LOG_HEADER)
-    with open(cfg.SIGNAL_LOG_PATH, "a", newline="") as f:
-        writer = csv.writer(f)
-        if needs_header:
-            writer.writerow(SIGNAL_LOG_HEADER)
-        writer.writerow(
-            [datetime.now(timezone.utc).isoformat(), snapshot.price]
-            + _book_log_values(snapshot)
-            + [snapshot.individual.get(name, "") for name in ALL_SIGNAL_NAMES]
-        )
+    row = (
+        [_now().isoformat(), snapshot.price]
+        + _book_log_values(snapshot)
+        + [snapshot.individual.get(name, "") for name in ALL_SIGNAL_NAMES]
+    )
+    append_row(cfg.SIGNAL_LOG_PATH, SIGNAL_LOG_HEADER, row,
+               skip_if=lambda: _is_repeat(cfg.SIGNAL_LOG_PATH, SIGNAL_LOG_HEADER, row))
 
 
 _ABBR = {"bullish": "BULL", "bearish": "BEAR", "neutral": "NEUT"}
 
 
-def format_status_line(snapshot: signals.SignalSnapshot) -> str:
+def format_status_line(snapshot: signals.SignalSnapshot, live_price: float = None) -> str:
     tags = " ".join(f"{name}:{_ABBR[val]}" for name, val in snapshot.individual.items())
     book = snapshot.book or {}
     if book.get("available"):
@@ -164,7 +189,7 @@ def format_status_line(snapshot: signals.SignalSnapshot) -> str:
                           if snapshot.imbalance is not None else "imbalance=--")
     return (
         f"[{datetime.now().strftime('%H:%M:%S')}] "
-        f"${snapshot.price:,.2f}  "
+        f"${(snapshot.price if live_price is None else live_price):,.2f}  "
         f"composite={snapshot.composite.upper()} ({snapshot.strength}/{len(snapshot.individual)})  "
         f"{imbalance_txt}  "
         f"{tags}"
@@ -255,7 +280,10 @@ def run():
     try:
         while True:
             try:
-                df = data_fetch.get_candles(cfg.PRODUCT_ID, cfg.GRANULARITY, cfg.CANDLE_HISTORY)
+                raw = data_fetch.get_candles(cfg.PRODUCT_ID, cfg.GRANULARITY, cfg.CANDLE_HISTORY)
+                # Signals on completed candles only, like the backtest; the
+                # status line still shows the latest price.
+                df, _ = data_fetch.drop_forming_candle(raw, cfg.GRANULARITY)
                 df = indicators.compute_all(df, cfg)
 
                 book_snapshot = book_handle.snapshot() if book_handle is not None else None
@@ -286,7 +314,7 @@ def run():
                 outlook_result = outlook.build_outlook(snapshot, div, confidence, weighted)
                 log_signal_snapshot(snapshot)
 
-                print(format_status_line(snapshot))
+                print(format_status_line(snapshot, live_price=float(raw["close"].iloc[-1])))
                 for line in format_book_lines(snapshot):
                     print(f"  {line}")
                 print(f"  outlook: {outlook_result['headline']}")

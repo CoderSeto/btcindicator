@@ -10,6 +10,10 @@ second opinion: "if you'd trusted each indicator in proportion to how
 often it's actually been right, which way would that lean, and by how
 much?"
 
+Weights are measured as edge over the window's base rate, on the
+overlap-corrected effective sample size, and stay at 1.0 unless that edge
+clears INDICATOR_WEIGHT_MIN_Z standard errors -- see weight_details().
+
 Methodological caveat, worth keeping in mind: the weights come from the
 same historical window backtest.py covers. That's a real historical edge,
 grounded in actual frequency -- but it is NOT an independent, out-of-sample
@@ -22,19 +26,61 @@ consider alongside the raw composite, not a replacement for it.
 _WEIGHTABLE_INDICATORS = ["sma_cross", "ema_cross", "rsi", "macd", "bollinger", "volume", "agg_delta"]
 
 
-def _weight_from_bucket(bucket, cfg) -> float:
+def weight_details(bucket, cfg) -> dict:
     """
-    weight = 1.0 + SCALE * (hit_rate - 0.5), clipped to [MIN, MAX].
-    A coin-flip (50%) indicator gets weight 1.0 -- same as unweighted.
-    No bucket, or fewer than BACKTEST_MIN_SAMPLE occurrences, also falls
-    back to 1.0 (neutral) rather than trusting a noisy small-sample edge.
+    The weight for one indicator/direction bucket, and why it is what it is.
+
+        edge   = hit_rate - base_rate
+        z      = edge / sqrt(base_rate * (1 - base_rate) / n_eff)
+        weight = 1.0 + SCALE * edge, clipped to [MIN, MAX]
+
+    `base_rate` is how often the backtested window moved in this direction at
+    all, so it's what a call with no skill scores. Measuring edge against 0.5
+    instead rewarded every bullish call in a window that drifted up
+    (REVIEW_FINDINGS D3). `n_eff` is the overlap-corrected sample size from
+    backtest.effective_sample_size(); the raw row count overstates the
+    evidence ~3.5x for the persistent state votes.
+
+    The weight stays at 1.0 -- the same "no evidence" answer as a missing
+    bucket -- when n_eff < BACKTEST_MIN_SAMPLE, or when |z| <
+    INDICATOR_WEIGHT_MIN_Z, i.e. the edge is within sampling noise. On
+    backtests of a pure random walk, ungated weights still spread +/-0.08 to
+    +/-0.16 from noise alone.
+
+    Results saved before n_eff/base_rate existed fall back to n_eff = total and
+    base_rate = 0.5, the old behaviour (re-run the backtest to get the honest
+    numbers).
+
+    Returns {"weight", "reason", "edge", "z", "n_eff", "base_rate"}, with
+    reason one of "no_data", "small_sample", "within_noise", "measured".
     """
-    if not bucket or bucket.get("total", 0) < cfg.BACKTEST_MIN_SAMPLE:
-        return 1.0
+    out = {"weight": 1.0, "reason": "no_data", "edge": None, "z": None, "n_eff": None, "base_rate": None}
+    if not bucket or not bucket.get("total"):
+        return out
+    n_eff = bucket.get("n_eff", bucket["total"])
+    base = bucket.get("base_rate")
+    base = 0.5 if base is None else base
     hit_rate = bucket["hits"] / bucket["total"]
-    edge = hit_rate - 0.5
+    edge = hit_rate - base
+    se = (base * (1.0 - base) / n_eff) ** 0.5 if n_eff > 0 else float("inf")
+    z = edge / se if se > 0 else (0.0 if edge == 0 else float("inf"))
+    out.update(edge=edge, z=z, n_eff=n_eff, base_rate=base)
+
+    if n_eff < cfg.BACKTEST_MIN_SAMPLE:
+        out["reason"] = "small_sample"
+        return out
+    if abs(z) < getattr(cfg, "INDICATOR_WEIGHT_MIN_Z", 0.0):
+        out["reason"] = "within_noise"
+        return out
     weight = 1.0 + cfg.INDICATOR_WEIGHT_SCALE * edge
-    return max(cfg.INDICATOR_WEIGHT_MIN, min(cfg.INDICATOR_WEIGHT_MAX, weight))
+    out["weight"] = max(cfg.INDICATOR_WEIGHT_MIN, min(cfg.INDICATOR_WEIGHT_MAX, weight))
+    out["reason"] = "measured"
+    return out
+
+
+def _weight_from_bucket(bucket, cfg) -> float:
+    """Just the weight from weight_details()."""
+    return weight_details(bucket, cfg)["weight"]
 
 
 def compute_weights(results, cfg) -> dict:
@@ -49,14 +95,19 @@ def compute_weights(results, cfg) -> dict:
     at all. Callers should default to weight 1.0 for them and for any
     other name not present.
     """
+    return {
+        name: {d: detail["weight"] for d, detail in dirs.items()}
+        for name, dirs in compute_weight_details(results, cfg).items()
+    }
+
+
+def compute_weight_details(results, cfg) -> dict:
+    """Same shape as compute_weights(), with weight_details() dicts as the values."""
     buckets = (results or {}).get("indicator_buckets", {})
-    weights = {}
-    for name in _WEIGHTABLE_INDICATORS:
-        weights[name] = {
-            "bullish": _weight_from_bucket(buckets.get(f"{name}_bullish"), cfg),
-            "bearish": _weight_from_bucket(buckets.get(f"{name}_bearish"), cfg),
-        }
-    return weights
+    return {
+        name: {d: weight_details(buckets.get(f"{name}_{d}"), cfg) for d in ("bullish", "bearish")}
+        for name in _WEIGHTABLE_INDICATORS
+    }
 
 
 def weighted_conviction(snapshot, weights: dict) -> dict:

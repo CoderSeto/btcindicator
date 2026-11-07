@@ -68,6 +68,8 @@ websocket.setdefaulttimeout(15)
 
 _BINANCE_US_REST_BASE = "https://api.binance.us"
 _BINANCE_SNAPSHOT_LIMIT = 5000
+# After a failed book sync, wait this long before the stream may trigger another.
+_BINANCE_RESYNC_COOLDOWN_SECONDS = 10.0
 
 
 # --- Message parsers ------------------------------------------------------
@@ -434,6 +436,12 @@ class BookAggregator:
             "ask_notional": aggregate["ask_notional"],
             "agreement": aggregate["agreement"],
             "venue_count": aggregate["venue_count"],
+            # Per-venue in-band notional, so flow can compare the same venues at
+            # both ends of its window (see _flow).
+            "venue_notional": {
+                venue: (m["bid_notional"], m["ask_notional"])
+                for venue, m in aggregate["venues"].items()
+            },
         }
 
         with self._lock:
@@ -458,10 +466,22 @@ class BookAggregator:
         accumulate enough age to be reported as held.
         """
         cfg = self.cfg
+        grace = self._max_sample_gap()
+        # Expire first, against the time this sample was taken. Pruning only after
+        # updating let a wall seen on both sides of an unsampled outage carry its
+        # age straight across it.
+        for key in [k for k, e in self._walls.items() if now - e["last_seen"] > grace]:
+            del self._walls[key]
+
         seen = set()
         for wall in walls:
-            bucket_size = max(wall["price"] * cfg.BOOK_WALL_MATCH_BPS / 10_000.0, 1e-9)
-            key = (wall.get("venue"), wall["side"], round(wall["price"] / bucket_size))
+            # Buckets of a fixed width in basis points, i.e. fixed in log price.
+            # (Sizing the bucket from the wall's own price, price / (price * bps),
+            # gave every price the same key, so all walls on a side merged into
+            # one entry and a brand-new wall inherited an old one's age.)
+            bucket_bps = max(cfg.BOOK_WALL_MATCH_BPS, 1e-9)
+            key = (wall.get("venue"), wall["side"],
+                   round(math.log(wall["price"]) * 10_000.0 / bucket_bps))
             seen.add(key)
             entry = self._walls.get(key)
             if entry is None:
@@ -472,12 +492,20 @@ class BookAggregator:
 
         # A wall briefly absent from one sample (partially consumed, then
         # replenished) shouldn't lose its accumulated age, so entries are
-        # only dropped after a few samples' grace.
-        grace = max(3.0 * cfg.BOOK_SAMPLE_INTERVAL_SECONDS, 3.0)
-        for key in [k for k, e in self._walls.items() if now - e["last_seen"] > grace]:
-            del self._walls[key]
+        # only dropped after a few samples' grace -- checked above, before
+        # this sample's sightings refresh anything.
 
     # -- derived reads --
+
+    def _max_sample_gap(self) -> float:
+        """
+        The longest silence between two samples that still counts as continuous
+        observation. Samples are only taken while some venue has a usable book, so
+        a longer hole means nobody was watching -- an outage, or the machine asleep
+        -- and whatever held before it can't be credited with holding through it.
+        Same allowance the wall tracker uses for a briefly missing wall.
+        """
+        return max(3.0 * self.cfg.BOOK_SAMPLE_INTERVAL_SECONDS, 3.0)
 
     def _persistence(self, history) -> dict:
         """
@@ -501,8 +529,11 @@ class BookAggregator:
         end_ts = history[-1]["ts"]
         start_ts = end_ts
         run = []
+        max_gap = self._max_sample_gap()
         for s in reversed(history):
             v = s["imbalance"]
+            if run and start_ts - s["ts"] > max_gap:
+                break  # a hole in the history: the run can't be traced across it
             if abs(v) >= threshold and (1 if v > 0 else -1) == sign:
                 start_ts = s["ts"]
                 run.append(v)
@@ -554,12 +585,27 @@ class BookAggregator:
             return {"available": False,
                     "reason": f"only {elapsed:.0f}s of book history, need {window:.0f}s"}
 
-        if min(past["bid_notional"], past["ask_notional"],
-               now["bid_notional"], now["ask_notional"]) <= 0:
+        # Only venues in the aggregate at BOTH ends count. Summing whatever was
+        # usable at each end turns a venue dropping out (a disconnect, or the
+        # spread gate during volatility) into "liquidity pulled" on whichever
+        # side that venue was heavier on.
+        past_bid, past_ask = past["bid_notional"], past["ask_notional"]
+        now_bid, now_ask = now["bid_notional"], now["ask_notional"]
+        if "venue_notional" in past and "venue_notional" in now:
+            common = sorted(set(past["venue_notional"]) & set(now["venue_notional"]))
+            if not common:
+                return {"available": False,
+                        "reason": "no venue was in the aggregate at both ends of the window"}
+            past_bid = sum(past["venue_notional"][v][0] for v in common)
+            past_ask = sum(past["venue_notional"][v][1] for v in common)
+            now_bid = sum(now["venue_notional"][v][0] for v in common)
+            now_ask = sum(now["venue_notional"][v][1] for v in common)
+
+        if min(past_bid, past_ask, now_bid, now_ask) <= 0:
             return {"available": False, "reason": "a side of the book was empty in the window"}
 
-        bid_ratio = now["bid_notional"] / past["bid_notional"]
-        ask_ratio = now["ask_notional"] / past["ask_notional"]
+        bid_ratio = now_bid / past_bid
+        ask_ratio = now_ask / past_ask
         value = math.log(bid_ratio) - math.log(ask_ratio)
 
         return {
@@ -715,8 +761,33 @@ def _binance_book_runner(agg: BookAggregator, symbol: str, stop_event: threading
     url = f"wss://stream.binance.us:9443/ws/{symbol.lower()}@depth@100ms"
 
     def create_app():
-        state = {"buffer": [], "syncing": False}
+        # `syncing` is True from the moment a resync starts until the buffer it
+        # collected has been fully replayed onto the new book. While it's True,
+        # every stream event goes into the buffer -- never straight onto the book
+        # -- so events reach the book in stream order even while the snapshot is
+        # being installed. `retry_after` spaces out attempts after a failed sync.
+        state = {"buffer": [], "syncing": False, "retry_after": 0.0}
         state_lock = threading.Lock()
+
+        def drain(consumed: int) -> bool:
+            """
+            Replays buffered events past `consumed` until the buffer is empty,
+            then hands the stream back to on_message by clearing `syncing` --
+            under the same lock on_message checks, so no event can fall between
+            the last replayed one and the first applied live. Returns False if
+            the replay hit a gap (the book has been discarded).
+            """
+            while True:
+                with state_lock:
+                    extra = state["buffer"][consumed:]
+                    if not extra:
+                        state["buffer"] = []
+                        state["syncing"] = False
+                        return True
+                    consumed += len(extra)
+                for event in extra:
+                    if agg.apply_sequenced_update(name, event) == "gap":
+                        return False
 
         def resync():
             """Fetch a REST snapshot and splice the buffered events onto it."""
@@ -756,23 +827,9 @@ def _binance_book_runner(agg: BookAggregator, symbol: str, stop_event: threading
                         time.sleep(1.0)
                         continue
 
-                    if agg.seed_sequenced_book(name, snap.get("bids"), snap.get("asks"),
-                                               last_update_id, buffered):
-                        # Events that landed while the snapshot was being
-                        # applied are still sitting in the buffer. Drain
-                        # them before clearing it -- dropping even one
-                        # would leave a sequence hole and immediately
-                        # trigger another resync.
-                        while True:
-                            with state_lock:
-                                extra = state["buffer"][consumed:]
-                                if not extra:
-                                    state["buffer"] = []
-                                    state["syncing"] = False
-                                    break
-                                consumed += len(extra)
-                            for event in extra:
-                                agg.apply_sequenced_update(name, event)
+                    if (agg.seed_sequenced_book(name, snap.get("bids"), snap.get("asks"),
+                                                last_update_id, buffered)
+                            and drain(consumed)):
                         agg.set_status(name, "connected")
                         return
                     time.sleep(1.0)
@@ -780,10 +837,16 @@ def _binance_book_runner(agg: BookAggregator, symbol: str, stop_event: threading
                 agg.set_status(name, "error: could not sync book")
             except Exception as e:
                 agg.set_status(name, f"error: {e}")
-                agg.reset_book(name)
             finally:
                 with state_lock:
-                    state["syncing"] = False
+                    if state["syncing"]:
+                        # Didn't finish: leave nothing half-built, and hold off
+                        # before the next attempt rather than hammering the
+                        # REST endpoint (a 5000-level depth request is heavy).
+                        agg.reset_book(name)
+                        state["buffer"] = []
+                        state["syncing"] = False
+                        state["retry_after"] = time.time() + _BINANCE_RESYNC_COOLDOWN_SECONDS
 
         def start_resync():
             threading.Thread(target=resync, daemon=True).start()
@@ -801,18 +864,22 @@ def _binance_book_runner(agg: BookAggregator, symbol: str, stop_event: threading
             if not event:
                 return
 
+            with state_lock:
+                if state["syncing"]:
+                    # A sync is in flight: hold the event so it's replayed in
+                    # order once the snapshot lands.
+                    state["buffer"].append(event)
+                    return
+                retry_after = state["retry_after"]
+
             result = agg.apply_sequenced_update(name, event)
             if result in ("applied", "stale"):
                 return
-            if result == "not_seeded":
-                # Still waiting on the REST snapshot -- hold the event so
-                # it can be replayed once the snapshot lands.
-                with state_lock:
-                    if state["syncing"]:
-                        state["buffer"].append(event)
-                return
-            # "gap": the book was discarded, rebuild it from a fresh snapshot.
-            start_resync()
+            # "gap": the book was discarded. "not_seeded": an earlier sync failed
+            # and nothing else would ever retry it -- without this the venue
+            # stayed dark until the socket happened to reconnect.
+            if result == "gap" or time.time() >= retry_after:
+                start_resync()
 
         def on_error(ws, error):
             agg.set_status(name, f"error: {error}")

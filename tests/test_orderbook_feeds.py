@@ -13,7 +13,10 @@ Sources for the payloads below:
     "How to manage a local order book correctly"
   - Bybit v5 WebSocket public orderbook docs (snapshot, delta)
 """
+import json
 import math
+import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -390,9 +393,8 @@ def _wall(price, notional=1_000_000.0, side="ask", venue="coinbase"):
 
 def test_wall_age_accumulates_across_samples():
     agg = obf.BookAggregator(_Cfg)
-    agg._track_walls([_wall(100_100.0)], now=1000.0)
-    agg._track_walls([_wall(100_100.0)], now=1010.0)
-    agg._track_walls([_wall(100_100.0)], now=1020.0)
+    for t in range(1000, 1021):                                              # sampled every second
+        agg._track_walls([_wall(100_100.0)], now=float(t))
 
     walls = agg._aged_walls(1020.0)
     assert len(walls) == 1
@@ -408,7 +410,8 @@ def test_a_wall_repriced_by_a_tick_keeps_its_age():
     """
     agg = obf.BookAggregator(_Cfg)
     agg._track_walls([_wall(100_100.0)], now=1000.0)
-    agg._track_walls([_wall(100_100.5)], now=1020.0)  # 0.05bps away
+    for t in range(1001, 1021):                                              # sampled every second
+        agg._track_walls([_wall(100_100.5)], now=float(t))                  # 0.05bps away
     walls = agg._aged_walls(1020.0)
     assert len(walls) == 1
     assert walls[0]["age_seconds"] == pytest.approx(20.0)
@@ -493,3 +496,193 @@ def test_a_stalled_sampler_is_reported_rather_than_served_as_live():
     stale = agg.snapshot()
     assert stale["available"] is False
     assert "stale" in stale["reason"]
+
+
+# --- review regressions: gaps, venue churn, Binance resync (see REVIEW_FINDINGS.md) ---
+
+def test_persistence_does_not_bridge_a_gap_in_the_history():
+    """
+    The history only gets a sample while some venue has a usable book, so an outage (every
+    venue dropped, the machine asleep) leaves a hole. A lean seen before and after the hole has
+    not been *observed* holding through it -- "time is evidence" only for time we watched.
+    """
+    agg = obf.BookAggregator(_Cfg)
+    history = _history([(0, 0.5), (1, 0.5), (2, 0.5), (300, 0.5), (301, 0.5)])
+    result = agg._persistence(history)
+    assert result["direction"] == "bullish"
+    assert result["seconds"] == pytest.approx(1.0)
+
+
+def test_wall_age_does_not_bridge_a_sampling_gap():
+    # _track_walls only runs when a sample is taken, so the grace check never saw the outage.
+    agg = obf.BookAggregator(_Cfg)
+    agg._track_walls([_wall(100_100.0)], now=1000.0)
+    agg._track_walls([_wall(100_100.0)], now=1001.0)
+    agg._track_walls([_wall(100_100.0)], now=1300.0)                        # 5 minutes unobserved
+    walls = agg._aged_walls(1300.0)
+    assert len(walls) == 1
+    assert walls[0]["age_seconds"] == pytest.approx(0.0)
+    assert walls[0]["held"] is False
+
+
+def _clocked(monkeypatch, start=1_000_000.0):
+    clock = {"t": start}
+    monkeypatch.setattr(obf, "time", SimpleNamespace(time=lambda: clock["t"], sleep=lambda s: None))
+    return clock
+
+
+def test_flow_ignores_a_venue_leaving_the_aggregate(monkeypatch):
+    """
+    The flow numerator/denominator were the *summed* notional of whichever venues were usable at
+    each end of the window. A bid-heavy venue dropping out (disconnect, or the spread gate during
+    volatility) then reads as resting bids being pulled -- a book_flow vote nobody placed. Flow
+    must compare like with like: only venues present at both ends.
+    """
+    clock = _clocked(monkeypatch)
+    agg = obf.BookAggregator(_Cfg)
+    agg.apply_snapshot("coinbase", [["99999", "10"]], [["100001", "10"]])  # balanced, unchanged
+    agg.apply_snapshot("bybit", [["99998", "30"]], [["100002", "10"]])     # bid-heavy
+    assert agg.sample()["venue_count"] == 2
+    clock["t"] += 61.0
+    agg.reset_book("bybit")                                                  # bybit drops out
+    assert agg.sample()["venue_count"] == 1
+
+    flow = agg.snapshot()["flow"]
+    # The old code reported log(10/40) - log(10/20) = -0.69: a strong "bearish" flow.
+    assert flow["available"] is True
+    assert flow["value"] == pytest.approx(0.0, abs=1e-12)
+    assert flow["bid_change_pct"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_flow_is_unavailable_when_no_venue_spans_the_window(monkeypatch):
+    clock = _clocked(monkeypatch)
+    agg = obf.BookAggregator(_Cfg)
+    agg.apply_snapshot("bybit", [["99998", "30"]], [["100002", "10"]])
+    agg.sample()
+    clock["t"] += 61.0
+    agg.reset_book("bybit")
+    agg.apply_snapshot("coinbase", [["99999", "10"]], [["100001", "10"]])
+    agg.sample()
+    flow = agg.snapshot()["flow"]
+    assert flow["available"] is False
+    assert "venue" in flow["reason"]
+
+
+class _BinanceHarness:
+    """
+    Drives _binance_book_runner's real callbacks with no socket and no threads: the WebSocketApp is
+    a recorder, background threads run inline, sleeps are skipped and the clock is fake. `snapshots`
+    is the queue of REST /depth responses (an Exception instance is raised instead).
+    """
+
+    def __init__(self, monkeypatch, snapshots):
+        self.clock = _clocked(monkeypatch)
+        self.snapshots = list(snapshots)
+        self.rest_calls = 0
+        self.apps = []
+        harness = self
+
+        class FakeApp:
+            def __init__(self, url, on_open, on_message, on_error, on_close):
+                self.on_open, self.on_message = on_open, on_message
+                harness.apps.append(self)
+
+        class InlineThread:
+            def __init__(self, target, args=(), daemon=None):
+                self.target, self.args = target, args
+
+            def start(self):
+                self.target(*self.args)
+
+        def get(url, params=None, timeout=None):
+            harness.rest_calls += 1
+            item = harness.snapshots.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: item)
+
+        monkeypatch.setattr(obf.websocket, "WebSocketApp", FakeApp)
+        monkeypatch.setattr(obf, "threading", SimpleNamespace(
+            Thread=InlineThread, Lock=threading.Lock, Event=threading.Event))
+        monkeypatch.setattr(obf, "requests", SimpleNamespace(get=get))
+        monkeypatch.setattr(obf, "run_with_reconnect",
+                            lambda name, create, stop, sink, holder: holder.setdefault("app", create()))
+        self.agg = obf.BookAggregator(_Cfg)
+        obf._binance_book_runner(self.agg, "BTCUSDT", threading.Event(), {})
+        self.app = self.apps[0]
+
+    def event(self, first_id, last_id, bids=None, asks=None):
+        self.app.on_message(self.app, json.dumps({
+            "e": "depthUpdate", "E": 0, "s": "BTCUSDT", "U": first_id, "u": last_id,
+            "b": bids or [], "a": asks or []}))
+
+
+def _depth(last_update_id):
+    return {"lastUpdateId": last_update_id, "bids": [["99999", "1"]], "asks": [["100001", "1"]]}
+
+
+def test_binance_recovers_after_a_failed_snapshot_fetch(monkeypatch):
+    """
+    One REST error while syncing used to be terminal: the book was left unseeded, `syncing` was
+    cleared, and on_message only ever re-synced on a *gap* -- never on "not_seeded" -- so Binance
+    dropped out of the aggregate until the socket itself happened to reconnect (up to 24h).
+    """
+    h = _BinanceHarness(monkeypatch, [ConnectionError("boom"), _depth(100)])
+    h.app.on_open(h.app)
+    assert h.rest_calls == 1 and not h.agg.is_ready("binance_us")
+
+    h.event(101, 101)                                                        # straight after: cool down,
+    assert h.rest_calls == 1                                                 # don't hammer the REST API
+
+    h.clock["t"] += 60.0
+    h.event(102, 102)
+    assert h.rest_calls == 2
+    assert h.agg.is_ready("binance_us")
+    assert h.agg._status["binance_us"] == "connected"
+
+
+def test_binance_events_arriving_while_the_snapshot_is_applied_are_replayed_in_order(monkeypatch):
+    """
+    The live stream kept applying events directly as soon as the snapshot was installed, while
+    events that had landed during the install were still waiting in the buffer. The first live
+    event then looked like a gap, the book was thrown away, the in-flight resync swallowed the
+    retry, and the status still ended up "connected" over an empty book.
+    """
+    h = _BinanceHarness(monkeypatch, [_depth(100)])
+    real_seed = h.agg.seed_sequenced_book
+
+    def seed_with_traffic(*args, **kwargs):
+        h.event(101, 101, bids=[["99998", "2"]])                             # lands mid-install
+        ok = real_seed(*args, **kwargs)
+        h.event(102, 102, asks=[["100002", "3"]])                            # stream carries on
+        return ok
+
+    h.agg.seed_sequenced_book = seed_with_traffic
+    h.app.on_open(h.app)
+
+    book = h.agg._books["binance_us"]
+    assert book.ready and book.update_id == 102
+    assert book.bids[99998.0] == 2.0 and book.asks[100002.0] == 3.0
+    assert h.agg._status["binance_us"] == "connected"
+
+
+def test_walls_at_different_prices_are_tracked_separately():
+    # The match key was round(price / (price * MATCH_BPS / 1e4)) == round(1e4 / MATCH_BPS): the
+    # same number for EVERY price, so all walls on one venue's side collapsed into a single entry.
+    agg = obf.BookAggregator(_Cfg)
+    agg._track_walls([_wall(100_100.0), _wall(100_900.0)], now=1000.0)
+    assert sorted(w["price"] for w in agg._aged_walls(1000.0)) == [100_100.0, 100_900.0]
+
+
+def test_a_new_wall_at_another_price_does_not_inherit_an_old_walls_age():
+    """
+    The spoof case wall age exists to catch: size that appears somewhere new is not "held" just
+    because a different wall sat elsewhere on that side for a while.
+    """
+    agg = obf.BookAggregator(_Cfg)
+    for t in range(1000, 1031):
+        agg._track_walls([_wall(100_100.0)], now=float(t))                  # held 30s at 100,100
+    agg._track_walls([_wall(100_900.0)], now=1031.0)                        # gone; new size 80bps away
+    new = [w for w in agg._aged_walls(1031.0) if w["price"] == 100_900.0]
+    assert len(new) == 1
+    assert new[0]["age_seconds"] == 0.0 and new[0]["held"] is False

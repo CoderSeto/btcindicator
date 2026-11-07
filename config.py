@@ -157,6 +157,14 @@ BACKTEST_RESULTS_PATH = "backtest_results.json"
 # CSV file alerts get appended to
 ALERT_LOG_PATH = "alerts_log.csv"
 
+# Minimum seconds between two rows in the alert and signal logs. The dashboard
+# reruns its whole script on every refresh tick, every widget click and in
+# every open tab, and the console bot writes the same files; without this each
+# rerun appended a row. A *different* alert (direction or strength changed) is
+# always logged straight away; only repeats are held back. Checked against the
+# file's own last row, so it also holds across processes. 0 disables it.
+LOG_MIN_INTERVAL_SECONDS = 20
+
 # --- Multi-exchange live feeds (aggregated volume, whale trades, liquidations) ---
 # Master switch -- set False to run on Coinbase REST data alone, no background
 # WebSocket connections.
@@ -177,11 +185,17 @@ LIQUIDATION_LIST_MAXLEN = 50
 # Turns each indicator's backtested hit rate into a weight for a SEPARATE
 # "weighted conviction" score, alongside (not replacing) the raw indicator
 # count used for the composite/alert threshold. Weight = 1.0 + SCALE *
-# (hit_rate - 0.5): a coin-flip (50%) indicator gets weight 1.0 (same as
-# unweighted); above/below 50% scales up/down from there.
+# (hit_rate - base_rate): a call that does no better than the window's own
+# drift gets weight 1.0 (same as unweighted); better/worse scales up/down.
 INDICATOR_WEIGHT_SCALE = 2.0
 INDICATOR_WEIGHT_MIN = 0.2  # floor -- a bad-track-record indicator still counts a little
 INDICATOR_WEIGHT_MAX = 2.0  # cap -- one strong indicator can't fully dominate
+# The edge is measured against the backtested window's base rate for that
+# direction (not 50%), on the overlap-corrected effective sample size, and a
+# weight only moves off 1.0 when that edge is at least this many standard
+# errors from zero. Below it the edge is indistinguishable from sampling noise
+# -- on a pure random walk, ungated weights still spread +/-0.08 to +/-0.16.
+INDICATOR_WEIGHT_MIN_Z = 2.0
 
 # --- Signal logging (for correlation analysis -- see analyze_correlation.py) ---
 # When True, logs EVERY cycle's full set of indicator votes to
@@ -210,6 +224,11 @@ AGG_DELTA_BACKTEST_MAX_REQUESTS = 300
 # regime change; shorter = more responsive but noisier. 120 (2 hours) is
 # a reasonable middle ground for a contract this short-dated.
 KALSHI_VOL_LOOKBACK_MINUTES = 120
+# The dashboard asks Kalshi for the open KXBTC15M market at most once per
+# this many seconds, shared across every open tab (the countdown is still
+# recomputed on every refresh). Kalshi has answered HTTP 429 to per-refresh
+# polling before. 0 polls on every refresh.
+KALSHI_POLL_SECONDS = 10
 
 # --- Kalshi prediction tracking / calibration (see kalshi_tracking.py) ---
 # When True, every fair-value computation (each dashboard refresh, while
@@ -231,3 +250,10 @@ KALSHI_CALIBRATION_BUCKET_SIZE = 0.2
 # Below this many resolved predictions in a bucket, its calibration rate
 # is flagged as low-sample rather than trusted at face value.
 KALSHI_CALIBRATION_MIN_SAMPLE = 5
+# Which logged row per contract the calibration report scores: the one
+# nearest this many minutes before close, if one lies within the tolerance
+# (contracts with none are left out). A fixed horizon compares like with like.
+# The closest-to-close row (the old choice) is nearly decided by then -- p near
+# 0 or 1 -- so it measured the model where it matters least.
+KALSHI_CALIBRATION_HORIZON_MINUTES = 5.0
+KALSHI_CALIBRATION_HORIZON_TOLERANCE_MINUTES = 1.0

@@ -46,6 +46,7 @@ import pandas as pd
 
 import backtest
 import config as cfg
+import data_fetch
 import exchange_feeds
 
 
@@ -98,6 +99,11 @@ def reconstruct_agg_delta_series(trades: list, candle_times: list, window_second
                 sell -= notional
             left += 1
 
+        if left == right:
+            # Empty window: reset exactly, so floating-point residue from the
+            # incremental add/subtract can't pose as a tiny nonzero reading.
+            buy = sell = 0.0
+
         total = buy + sell
         delta_ratio = (buy - sell) / total if total > 0 else None
         results.append({"delta_ratio": delta_ratio, "total_notional": total})
@@ -125,6 +131,7 @@ def run_agg_delta_backtest(cfg) -> dict:
     # Re-fetch the same candle history the base backtest used, for exact
     # aligned timestamps and closing prices to check outcomes against.
     df = backtest.fetch_history(cfg.PRODUCT_ID, cfg.GRANULARITY, cfg.BACKTEST_HISTORY_CANDLES, cfg.BACKTEST_REQUEST_PAUSE)
+    df, _ = data_fetch.drop_forming_candle(df, cfg.GRANULARITY)     # as backtest.py does
     warmup = backtest._warmup_candles(cfg)
     lookahead = cfg.BACKTEST_LOOKAHEAD_CANDLES
     min_needed = warmup + lookahead + 10
@@ -174,21 +181,13 @@ def run_agg_delta_backtest(cfg) -> dict:
 
     closes = df["close"].tolist()
     n = len(df)
-    agg_bullish_hits = agg_bullish_total = 0
-    agg_bearish_hits = agg_bearish_total = 0
+    obs = {}             # "agg_delta_bullish"/"agg_delta_bearish" -> [(i, hit), ...]
+    ups = scored = 0     # base rate over the candles this backtest could score
 
     for i in range(warmup, n - lookahead):
         reading = series[i]
         if reading["total_notional"] <= 0 or reading["delta_ratio"] is None:
             continue  # no Binance.US coverage for this candle's window
-
-        delta = reading["delta_ratio"]
-        if delta > cfg.AGG_DELTA_THRESHOLD:
-            direction = "bullish"
-        elif delta < -cfg.AGG_DELTA_THRESHOLD:
-            direction = "bearish"
-        else:
-            continue  # neutral -- not a directional call
 
         current_close = closes[i]
         future_close = closes[i + lookahead]
@@ -198,19 +197,27 @@ def run_agg_delta_backtest(cfg) -> dict:
             actual = "bearish"
         else:
             continue  # exact tie
+        scored += 1
+        ups += actual == "bullish"
 
-        if direction == "bullish":
-            agg_bullish_total += 1
-            agg_bullish_hits += 1 if actual == "bullish" else 0
+        delta = reading["delta_ratio"]
+        if delta > cfg.AGG_DELTA_THRESHOLD:
+            direction = "bullish"
+        elif delta < -cfg.AGG_DELTA_THRESHOLD:
+            direction = "bearish"
         else:
-            agg_bearish_total += 1
-            agg_bearish_hits += 1 if actual == "bearish" else 0
+            continue  # neutral -- not a directional call
 
+        obs.setdefault(f"agg_delta_{direction}", []).append((i, int(actual == direction)))
+
+    # Its own base rate: this window (AGG_DELTA_BACKTEST_HOURS, covered candles
+    # only) is not the candle backtest's window, and the edge has to be measured
+    # against the moves this backtest actually scored.
+    base_rates = {"bullish": ups / scored if scored else None,
+                  "bearish": (scored - ups) / scored if scored else None}
     base_results.setdefault("indicator_buckets", {})
-    if agg_bullish_total > 0:
-        base_results["indicator_buckets"]["agg_delta_bullish"] = {"hits": agg_bullish_hits, "total": agg_bullish_total}
-    if agg_bearish_total > 0:
-        base_results["indicator_buckets"]["agg_delta_bearish"] = {"hits": agg_bearish_hits, "total": agg_bearish_total}
+    base_results["indicator_buckets"].update(
+        backtest._summarize(obs, base_rates, backtest._direction_of, lookahead))
 
     base_results["agg_delta_backtest"] = {
         "source": "binance_us_only",
@@ -218,6 +225,7 @@ def run_agg_delta_backtest(cfg) -> dict:
         "trades_fetched": len(trades),
         "candles_with_coverage": sum(1 for r in series if r["total_notional"] > 0),
         "candles_total": n,
+        "base_rates": {**base_rates, "total": scored},
     }
 
     with open(cfg.BACKTEST_RESULTS_PATH, "w") as f:
@@ -247,8 +255,10 @@ def _print_summary(results: dict, cfg):
             print(f"  {key:18s}    no directional readings in this window")
             continue
         rate = b["hits"] / b["total"] * 100 if b["total"] else 0.0
-        flag = "  (low sample)" if b["total"] < cfg.BACKTEST_MIN_SAMPLE else ""
-        print(f"  {key:18s}  {rate:5.1f}%  (n={b['total']}){flag}")
+        n_eff = b.get("n_eff", b["total"])
+        flag = "  (low sample)" if n_eff < cfg.BACKTEST_MIN_SAMPLE else ""
+        vs = f"  vs base {b['base_rate'] * 100:4.1f}%" if b.get("base_rate") is not None else ""
+        print(f"  {key:18s}  {rate:5.1f}%{vs}  (n={b['total']}, ~{n_eff:.0f} independent){flag}")
 
     print(
         f"\nSaved to {cfg.BACKTEST_RESULTS_PATH} -- weighting.py will pick this up "

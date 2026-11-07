@@ -157,12 +157,26 @@ def _parse_iso_time(s) -> float:
 # live connection.
 
 def parse_coinbase_match(msg: dict) -> Optional[dict]:
-    """Coinbase Exchange 'matches' channel. 'side' is already the taker side."""
+    """
+    Coinbase Exchange 'matches' channel. 'side' is the MAKER order's side --
+    the resting order that was filled -- so the taker (aggressor) traded the
+    other way: side "sell" means a resting sell was lifted by a taker BUY.
+
+    This was once read as the taker side, which counted every Coinbase trade
+    backwards in agg_delta. Coinbase's own client applies a match to the
+    order book of `side`, looking up `maker_order_id` there (see
+    tests/test_exchange_feeds.py for the source). Binance's `m` and Bybit's
+    `S` describe the same thing with different conventions; all three are
+    normalized to the taker side here.
+    """
     if msg.get("type") != "match":
         return None
     try:
+        maker_side = msg["side"]
+        if maker_side not in ("buy", "sell"):
+            return None
         return {
-            "side": msg["side"],  # "buy" or "sell"
+            "side": "buy" if maker_side == "sell" else "sell",  # taker side
             "price": float(msg["price"]),
             "size": float(msg["size"]),
             "time": _parse_iso_time(msg.get("time")),
@@ -363,6 +377,10 @@ class TradeAggregator:
 
 # --- WebSocket runners ---------------------------------------------------
 
+# A connection that lasted at least this long resets the reconnect backoff.
+_HEALTHY_CONNECTION_SECONDS = 60.0
+
+
 def run_with_reconnect(name: str, create_app_fn, stop_event: threading.Event,
                         status_sink, holder: dict):
     """
@@ -380,14 +398,24 @@ def run_with_reconnect(name: str, create_app_fn, stop_event: threading.Event,
         aggregator.set_status(name, "connecting")
         ws_app = create_app_fn()
         holder["ws"] = ws_app
+        started = time.time()
         try:
             ws_app.run_forever(ping_interval=20, ping_timeout=10)
         except Exception as e:
             aggregator.set_status(name, f"error: {e}")
         if stop_event.is_set():
             break
+        # A connection that stayed up proves the path works, so its eventual
+        # drop is an ordinary disconnect, not the latest in a run of failures.
+        # Without this the backoff only ever grew, and after a few routine
+        # drops every reconnect cost the full ceiling of missing data.
+        if time.time() - started >= _HEALTHY_CONNECTION_SECONDS:
+            backoff = 1
         aggregator.set_status(name, "reconnecting")
-        time.sleep(backoff)
+        # Wait on the stop event rather than sleeping, so stop() isn't held up
+        # by a backoff of up to 30s.
+        if stop_event.wait(backoff):
+            break
         backoff = min(backoff * 2, 30)
     aggregator.set_status(name, "stopped")
 

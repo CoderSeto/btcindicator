@@ -26,6 +26,9 @@ def log_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "ALERT_LOG_PATH", str(alert))
     monkeypatch.setattr(cfg, "SIGNAL_LOG_PATH", str(signal))
     monkeypatch.setattr(cfg, "LOG_ALL_SIGNALS", True)
+    # These tests are about row shape, and write rows back to back on purpose;
+    # duplicate suppression has its own tests below.
+    monkeypatch.setattr(cfg, "LOG_MIN_INTERVAL_SECONDS", 0)
     return alert, signal
 
 
@@ -190,3 +193,70 @@ def test_legacy_imbalance_is_blank_when_the_rest_snapshot_was_skipped(log_paths)
     assert pd.isna(frame.loc[0, "imbalance"])
     # The aggregated reading is still there -- the two columns are independent.
     assert frame.loc[0, "book_imbalance"] == pytest.approx(0.42)
+
+
+# ---------- duplicate suppression ----------
+#
+# The dashboard reruns its whole script on every refresh tick, every widget click and in every open
+# tab, and the console bot writes the same files. Each rerun used to append a row, so one alert
+# condition became a row every few seconds per tab, and the signal log's n (which
+# analyze_correlation.py reports) counted reruns rather than observations.
+
+@pytest.fixture
+def clock(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    t = {"now": datetime(2026, 11, 7, 18, 0, 0, tzinfo=timezone.utc)}
+    monkeypatch.setattr(main, "_now", lambda: t["now"])
+    t["advance"] = lambda s: t.__setitem__("now", t["now"] + timedelta(seconds=s))
+    return t
+
+
+@pytest.fixture
+def deduped(log_paths, monkeypatch):
+    monkeypatch.setattr(cfg, "LOG_MIN_INTERVAL_SECONDS", 20)
+    return log_paths
+
+
+def test_a_repeated_alert_inside_the_interval_is_not_logged_again(deduped, clock):
+    alert, _ = deduped
+    main.log_alert(_snapshot(WARM_SIGNALS, WARM_BOOK))
+    clock["advance"](5)
+    main.log_alert(_snapshot(WARM_SIGNALS, WARM_BOOK))                     # same alert, 5s later
+    assert len(pd.read_csv(alert)) == 1
+    clock["advance"](20)
+    main.log_alert(_snapshot(WARM_SIGNALS, WARM_BOOK))                     # 25s after the logged one
+    assert len(pd.read_csv(alert)) == 2
+
+
+def test_a_different_alert_is_logged_even_inside_the_interval(deduped, clock):
+    alert, _ = deduped
+    main.log_alert(_snapshot(WARM_SIGNALS, WARM_BOOK))                     # bullish, strength 4
+    clock["advance"](5)
+    main.log_alert(_snapshot(COLD_SIGNALS))                                # bullish, strength 2
+    clock["advance"](5)
+    bearish = {k: ("bearish" if v == "bullish" else v) for k, v in WARM_SIGNALS.items()}
+    main.log_alert(_snapshot(bearish, WARM_BOOK))                          # flips to bearish
+    assert list(pd.read_csv(alert)["strength"]) == [4, 2, 5]                 # 4 flipped + macd
+    assert list(pd.read_csv(alert)["composite"]) == ["bullish", "bullish", "bearish"]
+
+
+def test_the_signal_log_takes_at_most_one_row_per_interval(deduped, clock):
+    _, signal = deduped
+    for _ in range(6):                                                     # a 5s dashboard refresh
+        main.log_signal_snapshot(_snapshot(WARM_SIGNALS, WARM_BOOK))
+        clock["advance"](5)
+    # rows at t=0 and t=20 (t=25 is only 5s after the second row)
+    assert len(pd.read_csv(signal)) == 2
+
+
+def test_dedupe_reads_the_file_so_it_holds_across_processes(deduped, clock, tmp_path):
+    # A row written by another process (the console bot) counts too: the check is against the
+    # file's last row, not anything held in memory.
+    alert, _ = deduped
+    main.log_alert(_snapshot(WARM_SIGNALS, WARM_BOOK))
+    text = alert.read_text()
+    alert.unlink()
+    alert.write_text(text)                                                 # "someone else" wrote it
+    clock["advance"](3)
+    main.log_alert(_snapshot(WARM_SIGNALS, WARM_BOOK))
+    assert len(pd.read_csv(alert)) == 1

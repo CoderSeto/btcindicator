@@ -10,24 +10,34 @@ This is a monitoring/alerting tool -- it does NOT place any trades.
 """
 import os
 from datetime import datetime
+from types import SimpleNamespace
 
 import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 import backtest
-import config as cfg
+import config as shared_config
 import exchange_feeds
 import kalshi
 import kalshi_api
 import kalshi_tracking
 import orderbook
 import orderbook_feeds
+import weighting
 from charts import build_figure
 from dashboard_data import load_state
 from main import log_alert, log_signal_snapshot
 
 st.set_page_config(page_title="BTC Indicator Bot", page_icon="\u20bf", layout="wide")
+
+# A private copy of config.py's settings for this run. Streamlit runs every
+# browser session's script in the same process, so writing the sidebar values
+# into the shared `config` module (as this page once did) made a new tab open
+# on the previous tab's pair and threshold, and let two live tabs render or log
+# one pair's data under the other's label mid-run. Everything below reads and
+# writes `cfg`; the shared module is only ever read, here.
+cfg = SimpleNamespace(**{k: getattr(shared_config, k) for k in dir(shared_config) if k.isupper()})
 
 PAIRS = ["BTC-USD", "ETH-USD", "SOL-USD", "BTC-EUR"]
 
@@ -130,12 +140,13 @@ product_id = st.sidebar.selectbox(
 refresh_seconds = st.sidebar.slider("Refresh interval (s)", 5, 120, cfg.POLL_INTERVAL, 5)
 # Upper bound is the full signal set: 6 candle-based + orderbook + book_flow + agg_delta.
 alert_threshold = st.sidebar.slider("Alert threshold (indicators aligned)", 1, 9, cfg.COMPOSITE_ALERT_THRESHOLD)
-st.sidebar.button("Refresh now", use_container_width=True)
+st.sidebar.button("Refresh now", width="stretch")
 st.sidebar.caption("Changes here apply immediately. Edit config.py to change other defaults "
                     "(indicator periods, order book depth, etc).")
 
-# These are shared module-level values, so this also updates what main.py's
-# log_alert() and the indicator/signal functions see.
+# This session's copy only (see the top of the file). Everything this page
+# calls is handed `cfg` explicitly; main.py's loggers read only the shared log
+# paths, which the sidebar never changes.
 cfg.PRODUCT_ID = product_id
 cfg.POLL_INTERVAL = refresh_seconds
 cfg.COMPOSITE_ALERT_THRESHOLD = alert_threshold
@@ -181,12 +192,17 @@ if cached_results and "error" not in cached_results:
         f"Last backtest: {cached_results['candles_used']} candles of "
         f"{cached_results['product_id']}, generated {gen_time} UTC"
     )
+    if "base_rates" not in cached_results:
+        st.sidebar.caption(
+            "\u26A0\uFE0F These results predate overlap-corrected sample sizes and base rates -- "
+            "re-run the backtest so the hit rates and weights are measured honestly."
+        )
 elif cached_results and "error" in cached_results:
     st.sidebar.caption(f"Last backtest attempt failed: {cached_results['error']}")
 else:
     st.sidebar.caption(f"No backtest yet for {product_id} at this granularity.")
 
-run_backtest_clicked = st.sidebar.button("Run backtest now", use_container_width=True)
+run_backtest_clicked = st.sidebar.button("Run backtest now", width="stretch")
 st.sidebar.caption(
     f"Pulls ~{cfg.BACKTEST_HISTORY_CANDLES} historical candles and checks how often each "
     "signal pattern actually preceded a move. Takes 10-30s. Can also run standalone: "
@@ -244,6 +260,9 @@ if state.error:
     st.stop()
 
 df, imbalance, snapshot = state.df, state.imbalance, state.snapshot
+# Signals are scored on completed candles (`df`); the header price and the
+# Kalshi model want the freshest print, forming candle included.
+live_price, price_df = state.live_price, state.price_df
 book_read = snapshot.book or {}
 outlook_result = state.outlook
 log_signal_snapshot(snapshot)
@@ -260,10 +279,15 @@ if alert_fired:
 # there's no one-frame lag: editing a strike reruns the script, and this
 # reads the new value before the widget is drawn again.
 auto_track = st.session_state.get("kalshi_auto_track", True)
+# KXBTC15M is a BTC/USD contract. Auto-tracking it on any other pair would
+# price a ~$75k BTC strike against that pair's candles (ETH, SOL, or BTC in
+# EUR) and log the result under the BTC ticker, so it only runs on BTC-USD.
+KALSHI_PAIR = "BTC-USD"
+kalshi_pair_ok = product_id == KALSHI_PAIR
 
 kalshi_live = None
-if auto_track:
-    kalshi_live = kalshi_api.current_btc15m_market()
+if auto_track and kalshi_pair_ok:
+    kalshi_live = kalshi_api.cached_btc15m_market(cfg.KALSHI_POLL_SECONDS)
     if kalshi_live["available"]:
         # Strike only resets when the window itself actually changes -- so a
         # manual edit mid-window survives instead of being fought every
@@ -274,16 +298,21 @@ if auto_track:
         st.session_state["kalshi_minutes"] = round(kalshi_live["minutes_remaining"], 2)
 
 if "kalshi_strike" not in st.session_state:
-    st.session_state["kalshi_strike"] = float(round(snapshot.price))
+    st.session_state["kalshi_strike"] = float(round(live_price))
 if "kalshi_minutes" not in st.session_state:
     st.session_state["kalshi_minutes"] = round(kalshi.minutes_until_next_kalshi_close(), 1)
 
 kalshi_result = kalshi.fair_value(
-    df, st.session_state["kalshi_strike"], st.session_state["kalshi_minutes"],
-    cfg.KALSHI_VOL_LOOKBACK_MINUTES,
+    price_df, st.session_state["kalshi_strike"], st.session_state["kalshi_minutes"],
+    cfg.KALSHI_VOL_LOOKBACK_MINUTES, candle_seconds=cfg.GRANULARITY,
 )
 
-if kalshi_result["available"] and kalshi_live and kalshi_live["available"]:
+# Only log a row that prices the tracked market's own strike. A hand-edited
+# strike survives refreshes on purpose, but its P(YES) answers a different
+# question from the one the ticker settles, and the calibration report would
+# score it against that ticker's outcome anyway.
+if (kalshi_result["available"] and kalshi_live and kalshi_live["available"]
+        and kalshi_result["strike"] == kalshi_live["strike"]):
     kalshi_tracking.log_prediction(
         cfg,
         ticker=kalshi_live["ticker"],
@@ -295,6 +324,7 @@ if kalshi_result["available"] and kalshi_live and kalshi_live["available"]:
         kalshi_yes_bid=kalshi_live["yes_bid"],
         kalshi_yes_ask=kalshi_live["yes_ask"],
         kalshi_last_price=kalshi_live["last_price"],
+        p_yes_point=kalshi_result["p_yes_point"],
     )
 
 kalshi_quote = None
@@ -326,7 +356,9 @@ emoji_map = {"bullish": "\U0001F7E2", "bearish": "\U0001F534", "neutral": "\u26a
 head_cols = st.columns(4)
 with head_cols[0]:
     with st.container(border=True):
-        st.metric(product_id, f"${snapshot.price:,.2f}")
+        st.metric(product_id, f"${live_price:,.2f}",
+                  help="Latest price. The signals below are scored on completed candles only, "
+                       "like the backtest, so they can lag this by up to one candle.")
 with head_cols[1]:
     with st.container(border=True):
         st.metric(
@@ -421,6 +453,9 @@ with left:
                         help="Pulls the currently open KXBTC15M contract's strike and close "
                              "time from Kalshi's public API each refresh.")
 
+        if auto_track and not kalshi_pair_ok:
+            st.caption(f"Auto-track only tracks KXBTC15M on {KALSHI_PAIR} -- on {product_id} "
+                       "this is a plain calculator on the values above.")
         if auto_track and kalshi_live and not kalshi_live["available"]:
             st.caption(f"\u26A0\uFE0F Auto-track couldn't reach Kalshi ({kalshi_live['reason']}) "
                        "-- using the values above.")
@@ -448,6 +483,9 @@ with left:
             if kalshi_live and kalshi_live["available"]:
                 bits.append(f"`{kalshi_live['ticker']}`")
             st.caption(_esc(" \u00b7 ".join(bits)))
+            if kalshi_result["final_minute"]:
+                st.caption("\u26A0\uFE0F Final minute: part of the settlement average is already "
+                           "fixed, and it's assumed to equal the current price. Rough.")
 
             path = _strike_path_liquidity(book_snapshot, kalshi_result, cfg)
             if path:
@@ -463,9 +501,9 @@ with right:
                      "neutral": "\u2696\ufe0f"}[snapshot.composite]
         st.markdown(f"**{lean_icon} {outlook_result['headline']}**")
         if outlook_result["detail"]:
-            st.caption(outlook_result["detail"])
+            st.caption(_esc(outlook_result["detail"]))
         if outlook_result["caution"]:
-            st.warning(outlook_result["caution"], icon="\u26A0\uFE0F")
+            st.warning(_esc(outlook_result["caution"]), icon="\u26A0\uFE0F")
         if outlook_result.get("book_note"):
             st.caption(_esc(f"\U0001F9F1 {outlook_result['book_note']}"))
         if outlook_result["weighted_line"]:
@@ -498,7 +536,7 @@ with tab_chart:
     # The one panel deliberately allowed to overflow the fold. Everything else
     # on the page is sized to fit a viewport; a price chart squeezed into
     # 330px would be useless, so this is the scroll the layout budgets for.
-    st.plotly_chart(build_figure(df, cfg), use_container_width=True)
+    st.plotly_chart(build_figure(df, cfg), width="stretch")
 
 with tab_book, st.container(height=TAB_BODY_HEIGHT, border=False):
     if not cfg.ENABLE_BOOK_FEEDS:
@@ -553,7 +591,7 @@ with tab_book, st.container(height=TAB_BODY_HEIGHT, border=False):
             for venue, m in agg["venues"].items()
         ]
         if venue_rows:
-            st.dataframe(pd.DataFrame(venue_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(venue_rows), width="stretch", hide_index=True)
         for venue, reason in (agg.get("excluded") or {}).items():
             st.caption(f"⚠️ {venue} excluded from the aggregate: {reason}")
 
@@ -572,7 +610,7 @@ with tab_book, st.container(height=TAB_BODY_HEIGHT, border=False):
                 }
                 for w in held_walls[:8]
             ]
-            st.dataframe(pd.DataFrame(wall_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(wall_rows), width="stretch", hide_index=True)
         else:
             st.caption("No resting walls have held long enough to report.")
 
@@ -610,7 +648,7 @@ with tab_feeds, st.container(height=TAB_BODY_HEIGHT, border=False):
                 whale_df["time"] = pd.to_datetime(whale_df["time"], unit="s").dt.strftime("%H:%M:%S")
                 whale_df["notional"] = whale_df["notional"].map(lambda v: f"${v:,.0f}")
                 st.dataframe(whale_df[["time", "exchange", "side", "notional", "price"]],
-                             use_container_width=True, hide_index=True)
+                             width="stretch", hide_index=True)
             else:
                 st.caption("None yet this session.")
         with liq_col:
@@ -621,7 +659,7 @@ with tab_feeds, st.container(height=TAB_BODY_HEIGHT, border=False):
                 liq_df["time"] = pd.to_datetime(liq_df["time"], unit="s").dt.strftime("%H:%M:%S")
                 liq_df["notional"] = liq_df["notional"].map(lambda v: f"${v:,.0f}")
                 st.dataframe(liq_df[["time", "exchange", "liquidated_side", "notional", "price"]],
-                             use_container_width=True, hide_index=True)
+                             width="stretch", hide_index=True)
             else:
                 st.caption("None yet this session.")
 
@@ -642,7 +680,7 @@ with tab_alerts, st.container(height=TAB_BODY_HEIGHT, border=False):
                 "is the simplest fix -- a fresh one will be created on the next alert."
             )
         else:
-            st.dataframe(log_df.tail(25).iloc[::-1], use_container_width=True, hide_index=True)
+            st.dataframe(log_df.tail(25).iloc[::-1], width="stretch", hide_index=True)
     else:
         st.caption("No alerts logged yet -- they'll show up here once enough indicators align.")
 
@@ -656,9 +694,11 @@ with tab_notes, st.container(height=TAB_BODY_HEIGHT, border=False):
             "source (CF Benchmarks' multi-exchange Real-Time Index) -- these can diverge by a "
             "few dollars, especially during a volatile close.\n"
             "- **Settlement averaging:** Kalshi settles on a 60-second average of the reference "
-            "price at close, not a single tick. This model treats it as a single point-in-time "
-            "draw, which slightly overstates how extreme the probability gets in the final "
-            "minute or two.\n"
+            "price at close, not a single tick, and P(YES) prices the 60-second settlement "
+            "average -- which puts it further from 50% than a point-in-time model, by 10+ "
+            "points in the last couple of minutes. In the final minute, prints already taken "
+            "are assumed equal to the current price (their real values aren't available "
+            "here), so treat P(YES) there as rough.\n"
             "- **No drift:** assumes a pure random walk (driftless geometric Brownian motion). "
             "It deliberately ignores the bot's own directional signals.\n"
             "- **Not financial advice.** A calculator, not a guarantee."
@@ -710,18 +750,35 @@ with tab_notes, st.container(height=TAB_BODY_HEIGHT, border=False):
 
         st.markdown("**Per-indicator weights**")
         breakdown = state.weighted.get("breakdown", {})
+        weight_details = weighting.compute_weight_details(state.backtest_results, cfg)
+
+        def _why(name, vote):
+            d = weight_details.get(name, {}).get(vote)
+            if d is None:
+                return "not backtestable"
+            if d["reason"] == "no_data":
+                return "no backtest data"
+            edge = f"edge {d['edge'] * 100:+.1f} pts vs {d['base_rate'] * 100:.0f}% base"
+            if d["reason"] == "small_sample":
+                return f"{edge}; only ~{d['n_eff']:.0f} independent samples"
+            if d["reason"] == "within_noise":
+                return f"{edge}, within noise (z={d['z']:.1f})"
+            return f"{edge}, z={d['z']:.1f}, ~{d['n_eff']:.0f} independent"
+
         if breakdown:
             rows = [
                 {"Indicator": long_labels.get(name, name), "Vote": v["vote"].upper(),
-                 "Weight": f"{v['weight']:.2f}"}
+                 "Weight": f"{v['weight']:.2f}", "Why": _why(name, v["vote"])}
                 for name, v in breakdown.items()
             ]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
         else:
             st.caption("Nothing directional to weigh right now.")
         st.caption(
-            "Weight 1.00 = counts the same as unweighted (no backtest data, or a coin-flip "
-            "historical hit rate). Above 1.00 = this indicator's calls have historically been "
-            "right more often; below 1.00 = less often. Order book, book flow and aggregated "
-            "exchange delta always show 1.00."
+            "Weight 1.00 = counts the same as unweighted: no backtest data, too few independent "
+            f"samples, or an edge over the base rate within {cfg.INDICATOR_WEIGHT_MIN_Z:.0f} "
+            "standard errors of zero (noise). Above 1.00 = this indicator's calls have beaten "
+            "the window's base rate for that direction; below 1.00 = done worse than it. Order book and book flow always show "
+            "1.00 (no historical depth data exists). Aggregated exchange delta shows 1.00 until "
+            "`python backtest_agg_delta.py` has been run, then a Binance.US-only estimate."
         )

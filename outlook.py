@@ -35,8 +35,10 @@ _DRIVER_PHRASES = {
         "bearish": "resting liquidity is building on the offer and/or thinning on the bid",
     },
     "macd": {
-        "bullish": "MACD just crossed above its signal line",
-        "bearish": "MACD just crossed below its signal line",
+        # A state, not an event: signals.py votes MACD by which side of its
+        # signal line it is on, however long ago it crossed.
+        "bullish": "MACD is above its signal line",
+        "bearish": "MACD is below its signal line",
     },
     "volume": {
         "bullish": "a volume spike accompanied the last up move",
@@ -91,22 +93,38 @@ def _confidence_lines(confidence: dict) -> list:
     sig = confidence.get("signal")
     if sig:
         pct = f"{sig['rate'] * 100:.0f}%"
-        caveat = " (small sample -- treat with caution)" if sig["low_sample"] else ""
+        vs, size, caveat = _evidence(sig)
         lines.append(
             f"Historically, this signal pattern has been followed by a {sig['direction']} move "
-            f"within {lookahead} candles {pct} of the time (n={sig['n']}){caveat}."
+            f"within {lookahead} candles {pct} of the time{vs} ({size}){caveat}."
         )
 
     div = confidence.get("divergence")
     if div:
         pct = f"{div['rate'] * 100:.0f}%"
-        caveat = " (small sample -- treat with caution)" if div["low_sample"] else ""
+        vs, size, caveat = _evidence(div)
         lines.append(
             f"{div['direction'].capitalize()} RSI/price divergence patterns like this have preceded a "
-            f"{div['direction']} move within {lookahead} candles {pct} of the time (n={div['n']}){caveat}."
+            f"{div['direction']} move within {lookahead} candles {pct} of the time{vs} ({size}){caveat}."
         )
 
     return lines
+
+
+def _evidence(entry: dict):
+    """
+    The context a hit rate needs to mean anything: what a no-skill call scored
+    in the same window (the base rate), and how many independent observations
+    the rows are worth once overlapping outcome windows are accounted for.
+    Results saved before either existed just show n, as before.
+    """
+    base = entry.get("base_rate")
+    vs = f", against a {base * 100:.0f}% base rate for any window" if base is not None else ""
+    n = entry["n"]
+    n_eff = entry.get("n_eff", n)
+    size = f"n={n:,}" if n_eff is None or round(n_eff) >= n else f"n={n:,}, about {n_eff:,.0f} independent"
+    caveat = " (small sample -- treat with caution)" if entry["low_sample"] else ""
+    return vs, size, caveat
 
 
 def _weighted_line(weighted: dict, snapshot) -> str:
@@ -117,6 +135,16 @@ def _weighted_line(weighted: dict, snapshot) -> str:
     """
     if not weighted or not weighted.get("available"):
         return ""
+
+    breakdown = weighted.get("breakdown") or {}
+    if breakdown and all(v["weight"] == 1.0 for v in breakdown.values()):
+        # Every weight fell back to 1.0 (no backtest, too few independent
+        # samples, or an edge within noise), so the weighted read IS the raw
+        # count -- quoting a "weighted conviction" figure would dress it up.
+        return (
+            "Weighting by historical accuracy changes nothing here: no indicator voting now has a "
+            "measured edge over the base rate."
+        )
 
     pct = f"{weighted['weighted_pct'] * 100:.0f}%"
     direction = weighted["direction"]
