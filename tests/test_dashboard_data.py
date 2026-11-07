@@ -312,3 +312,69 @@ def test_without_a_forming_candle_live_price_is_the_last_close(tmp_path, net):
     st = dashboard_data.load_state(make_cfg(tmp_path))                  # fixture candles end in the past
     assert len(st.df) == len(net.df)
     assert st.live_price == pytest.approx(net.df["close"].iloc[-1]) == pytest.approx(st.snapshot.price)
+
+
+# ---------- the live price comes from /ticker (the candles are cached ~5 minutes) ----------
+# Ticker payload: the shape of the "Get product ticker" example in Coinbase Exchange's REST docs
+# (ask, bid, volume, trade_id, price, size, time; numbers as strings). `price` was read live from
+# the user's machine on 2026-11-07; re-verify the rest against the docs when they're reachable.
+TICKER = {"ask": "75712.35", "bid": "75712.33", "volume": "8021.11", "trade_id": 912345678,
+          "price": "75712.34", "size": "0.004", "time": "2026-11-07T18:07:29.512Z"}
+
+
+class _Resp:
+    def __init__(self, payload, status=200):
+        self.payload, self.status_code = payload, status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise data_fetch.requests.HTTPError(f"{self.status_code} error")
+
+    def json(self):
+        return self.payload
+
+
+def test_latest_price_reads_the_ticker(monkeypatch):
+    seen = []
+    monkeypatch.setattr(data_fetch.requests, "get", lambda url, **k: seen.append(url) or _Resp(TICKER))
+    got = data_fetch.latest_price("BTC-USD", candles(5))
+    assert seen == ["https://api.exchange.coinbase.com/products/BTC-USD/ticker"]
+    assert got["source"] == "ticker" and got["price"] == 75_712.34 and got["reason"] is None
+    assert got["time"] == pd.Timestamp("2026-11-07T18:07:29.512Z")
+
+
+@pytest.mark.parametrize("failure", [
+    lambda url, **k: _Resp({"message": "rate limited"}, status=429),
+    lambda url, **k: (_ for _ in ()).throw(data_fetch.requests.ConnectionError("down")),
+    lambda url, **k: _Resp({**TICKER, "price": "0"}),
+    lambda url, **k: _Resp({k: v for k, v in TICKER.items() if k != "price"}),
+])
+def test_latest_price_falls_back_to_the_newest_candle_and_says_why(monkeypatch, failure):
+    monkeypatch.setattr(data_fetch.requests, "get", failure)
+    df = candles(5)
+    got = data_fetch.latest_price("BTC-USD", df)
+    assert got["source"] == "candles" and got["price"] == pytest.approx(df["close"].iloc[-1])
+    assert got["reason"].startswith("ticker unavailable")
+
+
+def test_latest_price_with_nothing_to_fall_back_on_is_none(monkeypatch):
+    monkeypatch.setattr(data_fetch, "get_ticker", lambda p: (_ for _ in ()).throw(RuntimeError("down")))
+    assert data_fetch.latest_price("BTC-USD", None)["price"] is None
+    assert data_fetch.latest_price("BTC-USD", candles(5).iloc[:0])["price"] is None
+
+
+def test_load_state_takes_the_live_price_from_the_ticker(tmp_path, net, monkeypatch):
+    monkeypatch.setattr(data_fetch, "get_ticker", lambda p: TICKER)
+    st = dashboard_data.load_state(make_cfg(tmp_path))
+    assert st.error is None
+    assert st.live_price == 75_712.34 and st.live_price_source == "ticker" and st.live_price_note is None
+    assert st.snapshot.price == pytest.approx(net.df["close"].iloc[-1])  # signals still on candles
+    assert len(st.price_df) == len(net.df)                              # vol input unchanged
+
+
+def test_load_state_survives_a_failed_ticker_and_flags_the_fallback(tmp_path, net, monkeypatch):
+    monkeypatch.setattr(data_fetch, "get_ticker", lambda p: (_ for _ in ()).throw(RuntimeError("429")))
+    st = dashboard_data.load_state(make_cfg(tmp_path))
+    assert st.error is None                                             # not an error state
+    assert st.live_price == pytest.approx(net.df["close"].iloc[-1])
+    assert st.live_price_source == "candles" and "429" in st.live_price_note

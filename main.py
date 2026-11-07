@@ -314,7 +314,11 @@ def run():
                 outlook_result = outlook.build_outlook(snapshot, div, confidence, weighted)
                 log_signal_snapshot(snapshot)
 
-                print(format_status_line(snapshot, live_price=float(raw["close"].iloc[-1])))
+                spot = data_fetch.latest_price(cfg.PRODUCT_ID, raw)
+                print(format_status_line(snapshot, live_price=spot["price"]))
+                if spot["source"] != "ticker":
+                    print(f"  !! {spot['reason']} -- price is the newest candle's close. "
+                          f"{data_fetch.CANDLE_CACHE_NOTE}.")
                 for line in format_book_lines(snapshot):
                     print(f"  {line}")
                 print(f"  outlook: {outlook_result['headline']}")

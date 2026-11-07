@@ -298,3 +298,22 @@ def test_settlement_probability_expired_and_bad_input():
     assert p(100, 100, 0, 0.5) == 1.0 and p(99, 100, -1, None) == 0.0
     with pytest.raises(ValueError):
         p(100, 100, 5, 0)
+
+
+def test_fair_value_prices_the_given_spot_and_takes_only_vol_from_the_candles():
+    # The candles can be ~5 minutes stale (Coinbase caches /candles), so the caller passes the
+    # ticker's price. Spot must come from it; vol must not change.
+    rng = np.random.default_rng(3)
+    closes = 100_000 * np.exp(np.cumsum(rng.normal(0, 0.0004, 100)))
+    df = _df(closes)
+    strike = closes[-1] + 30
+    from_candles = kalshi.fair_value(df, strike, 2.0, 40)
+    from_ticker = kalshi.fair_value(df, strike, 2.0, 40, current_price=closes[-1] + 60)
+    assert from_candles["current_price"] == closes[-1]                     # default unchanged
+    assert from_ticker["current_price"] == closes[-1] + 60
+    assert from_ticker["annual_vol"] == from_candles["annual_vol"]
+    vol = from_candles["annual_vol"]
+    assert from_ticker["p_yes"] == pytest.approx(kalshi.settlement_probability(closes[-1] + 60, strike, 2.0, vol))
+    assert from_ticker["p_yes_point"] == pytest.approx(kalshi.crossing_probability(closes[-1] + 60, strike, 2.0, vol))
+    assert from_ticker["p_yes"] > 0.5 > from_candles["p_yes"]               # spot crossed the strike
+    assert kalshi.fair_value(df, strike, 2.0, 40, current_price=0)["available"] is False

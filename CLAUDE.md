@@ -27,8 +27,9 @@ such, not slipped in quietly.
   time-ranged historical candle fetch used by the backtest. Also
   `drop_forming_candle()`: a candle is stamped with its bucket's start, so
   the last one may still be forming. Signals and the backtest use completed
-  candles only; the displayed price and the Kalshi model use the latest
-  print (`DashboardState.live_price` / `price_df`).
+  candles only. The displayed price and the Kalshi model's spot come from
+  `/ticker` via `latest_price()` (`DashboardState.live_price`), never from a
+  candle: see gotcha #19. `price_df` (raw candles) is only the vol input.
 - `exchange_feeds.py` -- live WebSocket feeds (Coinbase, Binance.US,
   Bybit trades + liquidations) feeding into `TradeAggregator`, a
   thread-safe rolling buy/sell aggregator. Also has the Binance.US REST
@@ -367,6 +368,15 @@ such, not slipped in quietly.
     `encoding="utf-8"` whenever a file can hold non-ASCII text.
     `tests/test_portability.py` re-runs collection (and the tests that read
     `app.py`) in a child interpreter with UTF-8 mode off and an ASCII locale.
+
+19. **Coinbase's `/candles` is cached for ~5 minutes.** Measured from the
+    user's machine: the newest 1-minute candle advanced 23:17 -> 23:22 ->
+    23:27, with its close frozen in between, so a "latest price" read off it
+    was up to 5 minutes old and $48 off `/ticker`. It even served a forming
+    candle's 24-second-old snapshot unchanged for 5 minutes. Take any price
+    someone acts on from `data_fetch.latest_price()` (the ticker, with a
+    flagged fallback). Never call the network from tests: `tests/conftest.py`
+    makes any real HTTP request raise.
 
 ## Testing approach
 

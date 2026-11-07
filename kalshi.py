@@ -201,12 +201,18 @@ def settlement_probability(current_price: float, strike: float, minutes_remainin
 
 
 def fair_value(df: pd.DataFrame, strike: float, minutes_remaining: float, lookback_minutes: int,
-               candle_seconds: int = 60) -> dict:
+               candle_seconds: int = 60, current_price: float = None) -> dict:
     """
-    Convenience wrapper: pulls current price from the latest candle close,
-    computes realized volatility over lookback_minutes, and returns the
+    Convenience wrapper: takes the current price (`current_price`, or the
+    latest candle close if it isn't given), computes realized volatility
+    over lookback_minutes from the candles, and returns the
     full picture -- not just the final probability, so every input is
     visible and auditable rather than a number appearing from nowhere.
+
+    Pass `current_price` from the ticker (data_fetch.latest_price): Coinbase's
+    candles endpoint is cached for ~5 minutes, so the last close can be minutes
+    old, which near settlement moves P(YES) by tens of points. Volatility over
+    a 120-minute window barely notices.
 
     Returns {"available": False, "reason": ...} if there isn't enough
     data to compute a trustworthy estimate.
@@ -216,7 +222,9 @@ def fair_value(df: pd.DataFrame, strike: float, minutes_remaining: float, lookba
     if strike <= 0:
         return {"available": False, "reason": "Strike must be a positive price."}
 
-    current_price = float(df["close"].iloc[-1])
+    current_price = float(df["close"].iloc[-1]) if current_price is None else float(current_price)
+    if not current_price > 0:
+        return {"available": False, "reason": "Current price must be a positive number."}
     vol_result = realized_volatility(df, lookback_minutes, candle_seconds)
     if vol_result["annual_vol"] is None:
         return {"available": False, "reason": vol_result["reason"]}
@@ -289,11 +297,16 @@ if __name__ == "__main__":
     print(f"Fetching recent {cfg.PRODUCT_ID} price history...")
     df = data_fetch.get_candles(cfg.PRODUCT_ID, cfg.GRANULARITY, max(cfg.CANDLE_HISTORY, lookback + 10))
 
-    result = fair_value(df, args.strike, minutes_remaining, lookback, candle_seconds=cfg.GRANULARITY)
+    spot = data_fetch.latest_price(cfg.PRODUCT_ID, df)
+    result = fair_value(df, args.strike, minutes_remaining, lookback, candle_seconds=cfg.GRANULARITY,
+                        current_price=spot["price"])
     if not result["available"]:
         print(f"[error] {result['reason']}")
     else:
-        print(f"\nCurrent price:       ${result['current_price']:,.2f}")
+        print(f"\nCurrent price:       ${result['current_price']:,.2f}  (from {spot['source']})")
+        if spot["source"] != "ticker":
+            print(f"  !! {spot['reason']}; using the newest candle instead. "
+                  f"{data_fetch.CANDLE_CACHE_NOTE}, which can move P(YES) a lot near the close.")
         print(f"Strike:              ${result['strike']:,.2f}")
         print(f"Minutes remaining:   {result['minutes_remaining']:.1f}")
         print(f"Annualized vol:      {result['annual_vol'] * 100:.1f}%  "

@@ -100,3 +100,41 @@ def get_ticker(product_id: str) -> dict:
     resp = requests.get(url, headers=HEADERS, timeout=10)
     resp.raise_for_status()
     return resp.json()
+
+
+# The bare `/candles?granularity=N` URL is served from a cache that Coinbase
+# refreshes about every 5 minutes: measured on 2026-11-07, the newest candle
+# went 23:17 -> 23:22 -> 23:27 and its close stayed frozen in between, so a
+# price read off it was up to ~5 minutes old and $48 (~6bp) off the ticker.
+# That's fine for indicators on 120-minute windows and fatal for a Kalshi
+# contract a minute from settling. The price people read and the Kalshi model
+# use comes from the ticker instead.
+CANDLE_CACHE_NOTE = ("Coinbase serves the candles endpoint from a cache refreshed about every "
+                     "5 minutes, so this price can be up to ~5 minutes old")
+
+
+def latest_price(product_id: str, candles: pd.DataFrame = None) -> dict:
+    """
+    The freshest price available: the last trade from /ticker.
+
+    Returns {"price", "source", "time", "reason"}. "source" is "ticker", or
+    "candles" when the ticker request failed and the newest candle's close is
+    used instead (then "reason" says why, and the price may be minutes stale --
+    CANDLE_CACHE_NOTE). With no ticker and no candles, "price" is None.
+    Never raises: a missing ticker shouldn't take the page down.
+    """
+    reason = None
+    try:
+        t = get_ticker(product_id)
+        price = float(t["price"])
+        if not price > 0:
+            raise ValueError(f"ticker price {t['price']!r} is not a positive number")
+        ts = t.get("time")
+        return {"price": price, "source": "ticker",
+                "time": pd.Timestamp(ts) if ts else None, "reason": None}
+    except Exception as e:                       # network, HTTP, schema: all mean "no ticker"
+        reason = f"ticker unavailable ({e})"
+    if candles is None or candles.empty:
+        return {"price": None, "source": None, "time": None, "reason": reason}
+    return {"price": float(candles["close"].iloc[-1]), "source": "candles",
+            "time": pd.Timestamp(candles["time"].iloc[-1]), "reason": reason}

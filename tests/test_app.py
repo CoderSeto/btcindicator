@@ -58,6 +58,7 @@ class Env:
         self.candle_requests = []
         self.kalshi_calls = 0
         self.candle_error = None
+        self.ticker = None                      # None: the ticker request fails (the page falls back)
         self.feed_snapshot = None
         self.book_snapshot = None
 
@@ -117,6 +118,12 @@ def env(monkeypatch, tmp_path):
         return e.df.copy()
     monkeypatch.setattr(data_fetch, "get_candles", get_candles)
     monkeypatch.setattr(data_fetch, "get_order_book", lambda *a, **k: REST_BOOK)
+
+    def get_ticker(product_id):
+        if e.ticker is None:
+            raise RuntimeError("ticker down")
+        return dict(e.ticker)
+    monkeypatch.setattr(data_fetch, "get_ticker", get_ticker)
 
     def current():
         e.kalshi_calls += 1
@@ -833,3 +840,50 @@ def test_the_page_uses_no_deprecated_streamlit_apis(env, caplog):
     deprecations = [r.getMessage() for r in caplog.records
                     if "deprecat" in r.name or "use_container_width" in r.getMessage()]
     assert deprecations == []
+
+
+# ---------- spot from the ticker, not the ~5-minute-cached candles ----------
+# Measured from the user's machine on 2026-11-07: Coinbase's /candles response changed only every
+# ~5 minutes (newest candle 23:17 -> 23:22 -> 23:27, its close frozen in between) and sat up to $48
+# (~6bp) off /ticker. The header and the Kalshi model now read the ticker.
+
+TICKER = {"ask": "75712.35", "bid": "75712.33", "volume": "8021.11", "trade_id": 912345678,
+          "price": "75712.34", "size": "0.004", "time": "2026-11-07T18:07:29.512Z"}
+
+
+def test_header_and_kalshi_price_come_from_the_ticker_not_the_cached_candles(env):
+    env.ticker = TICKER
+    env.kalshi = {"available": False, "reason": "x"}
+    at = run()
+    no_exception(at)
+    candle_close = env.df["close"].iloc[-1]
+    assert abs(candle_close - 75_712.34) > 5                               # the two really differ
+    assert metric(at, "BTC-USD").value == "$75,712.34"
+    text = all_text(at).replace("\\$", "$")
+    assert "$75,712.34 vs" in text                                         # Kalshi caption
+    assert "not the ticker" not in text
+    want = kalshi.fair_value(env.df, at.session_state["kalshi_strike"], at.session_state["kalshi_minutes"],
+                             cfg.KALSHI_VOL_LOOKBACK_MINUTES, current_price=75_712.34)
+    assert metric(at, "P(YES)").value == f"{want['p_yes'] * 100:.1f}%"
+
+
+def test_a_failed_ticker_falls_back_to_the_candle_and_warns_it_may_be_stale(env):
+    env.ticker = None
+    env.kalshi = {"available": False, "reason": "x"}
+    at = run()
+    no_exception(at)
+    assert metric(at, "BTC-USD").value == f"${env.df['close'].iloc[-1]:,.2f}"
+    stale = [c.value for c in at.caption if "not the ticker" in c.value]
+    assert len(stale) == 2                                                 # header and Kalshi block
+    assert all("ticker down" in c and "5 minutes" in c for c in stale)
+    assert any("Near the close" in c for c in stale)
+
+
+def test_logged_predictions_record_the_ticker_spot(env):
+    cfg.LOG_KALSHI_PREDICTIONS = True
+    env.ticker = TICKER
+    run()
+    row = pd.read_csv(cfg.KALSHI_PREDICTIONS_LOG_PATH).iloc[0]
+    assert row["current_price"] == pytest.approx(75_712.34)
+    want = kalshi.fair_value(env.df, 75_743.66, 7.5, cfg.KALSHI_VOL_LOOKBACK_MINUTES, current_price=75_712.34)
+    assert row["p_yes"] == pytest.approx(want["p_yes"])

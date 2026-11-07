@@ -17,6 +17,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 import backtest
+import data_fetch
 import config as shared_config
 import exchange_feeds
 import kalshi
@@ -261,8 +262,12 @@ if state.error:
 
 df, imbalance, snapshot = state.df, state.imbalance, state.snapshot
 # Signals are scored on completed candles (`df`); the header price and the
-# Kalshi model want the freshest print, forming candle included.
+# Kalshi model use the ticker's last trade (candles are cached ~5 minutes).
 live_price, price_df = state.live_price, state.price_df
+stale_price_warning = None
+if state.live_price_source != "ticker":
+    stale_price_warning = (f"\u26A0\uFE0F Price from the newest candle, not the ticker "
+                           f"({state.live_price_note}). {data_fetch.CANDLE_CACHE_NOTE}.")
 book_read = snapshot.book or {}
 outlook_result = state.outlook
 log_signal_snapshot(snapshot)
@@ -304,7 +309,7 @@ if "kalshi_minutes" not in st.session_state:
 
 kalshi_result = kalshi.fair_value(
     price_df, st.session_state["kalshi_strike"], st.session_state["kalshi_minutes"],
-    cfg.KALSHI_VOL_LOOKBACK_MINUTES, candle_seconds=cfg.GRANULARITY,
+    cfg.KALSHI_VOL_LOOKBACK_MINUTES, candle_seconds=cfg.GRANULARITY, current_price=live_price,
 )
 
 # Only log a row that prices the tracked market's own strike. A hand-edited
@@ -357,8 +362,11 @@ head_cols = st.columns(4)
 with head_cols[0]:
     with st.container(border=True):
         st.metric(product_id, f"${live_price:,.2f}",
-                  help="Latest price. The signals below are scored on completed candles only, "
-                       "like the backtest, so they can lag this by up to one candle.")
+                  help="Last trade, from Coinbase's ticker. The signals below are scored on "
+                       "completed candles only, like the backtest, and Coinbase refreshes its "
+                       "candles about every 5 minutes, so they can lag this by several minutes.")
+        if stale_price_warning:
+            st.caption(_esc(stale_price_warning))
 with head_cols[1]:
     with st.container(border=True):
         st.metric(
@@ -483,6 +491,8 @@ with left:
             if kalshi_live and kalshi_live["available"]:
                 bits.append(f"`{kalshi_live['ticker']}`")
             st.caption(_esc(" \u00b7 ".join(bits)))
+            if stale_price_warning:
+                st.caption(_esc(stale_price_warning + " Near the close that moves P(YES) a lot."))
             if kalshi_result["final_minute"]:
                 st.caption("\u26A0\uFE0F Final minute: part of the settlement average is already "
                            "fixed, and it's assumed to equal the current price. Rough.")
