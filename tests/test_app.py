@@ -703,13 +703,13 @@ def test_kalshi_auto_track_only_follows_the_btc_contract_on_btc_usd(env):
     assert "only tracks KXBTC15M on BTC-USD" in all_text(at)
 
 
-def test_settlement_averaging_caveat_states_the_right_direction(env):
-    # Averaging lowers the terminal variance, which makes the true probability MORE extreme than
-    # the point-in-time model (see test_kalshi.py::test_settlement_averaging_makes_the_true_
-    # probability_more_extreme). The Notes tab previously said the opposite.
+def test_notes_describe_the_settlement_average_model_and_its_final_minute_limit(env):
+    # P(YES) now prices the 60-second average (kalshi.settlement_probability). What remains a
+    # limitation is the final minute, where the already-elapsed prints are taken at spot.
     text = all_text(run())
     assert "overstates how extreme" not in text
-    assert "less extreme than the true" in text
+    assert "prices the 60-second settlement average" in text
+    assert "final minute" in text
 
 
 def test_fair_value_uses_the_configured_candle_size(env, monkeypatch):
@@ -770,3 +770,22 @@ def test_sidebar_asks_for_a_rerun_when_results_predate_effective_sample_sizes(en
 
 def long(name):
     return {"sma_cross": "SMA Cross", "ema_cross": "EMA Cross", "macd": "MACD"}[name]
+
+
+def test_final_minute_warns_that_the_settlement_average_is_partly_assumed(env):
+    env.kalshi = {"available": False, "reason": "x"}
+    at = run()
+    at.number_input(key="kalshi_minutes").set_value(0.5).run()
+    assert "Final minute" in all_text(at)
+    at.number_input(key="kalshi_minutes").set_value(3.0).run()
+    assert "Final minute" not in all_text(at)
+
+
+def test_predictions_log_the_point_in_time_model_alongside(env):
+    cfg.LOG_KALSHI_PREDICTIONS = True
+    run()
+    row = pd.read_csv(cfg.KALSHI_PREDICTIONS_LOG_PATH).iloc[0]
+    want = kalshi.fair_value(env.df, 75_743.66, 7.5, cfg.KALSHI_VOL_LOOKBACK_MINUTES)
+    assert row["p_yes_point"] == pytest.approx(want["p_yes_point"])
+    assert row["p_yes"] == pytest.approx(want["p_yes"])
+    assert row["p_yes"] != pytest.approx(row["p_yes_point"])               # the two models differ

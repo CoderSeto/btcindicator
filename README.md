@@ -657,13 +657,16 @@ Worth understanding *why* a gap exists before trusting it.
   is a 60-second average at the window's close, not a single tick — the
   well-known trap where price ticks above the strike right at the buzzer
   and the contract still settles NO, because the average of the closing
-  minute decided it, not the last print. This model treats settlement as
-  a single point-in-time draw. Averaging lowers the variance of what
-  actually settles, so the true probability is *more* extreme than the
-  model's -- the model is too close to 50%, never too far from it. That's
-  under a point early in the window, but large at the end: with 1 minute
-  left and spot 5bp above the strike the model says ~79% where the
-  averaged settlement is ~92%.
+  minute decided it, not the last print. P(YES) prices that average
+  (`kalshi.settlement_probability`). Averaging lowers the variance of what
+  settles, so this sits further from 50% than the textbook point-in-time
+  N(d2) -- under a point apart early in the window, large at the end: with
+  1 minute left and spot 5bp above the strike, point-in-time says ~79%
+  and the averaged settlement ~92%. The point-in-time figure is still
+  shown by the CLI and logged, for comparison. **What's still approximate
+  is the final minute:** some of the 60 prints have already been taken,
+  their real values aren't available here, and they're assumed equal to
+  the current price. The dashboard flags it.
 - **No drift, no jumps.** Standard simplifying assumption for pricing
   this kind of contract — not a claim that BTC actually moves this way.
 - **Not financial advice.** A calculator, not a guarantee, and this
@@ -723,9 +726,15 @@ reports two things:
   meaningful bar to clear, not an easy one.
 
 Each contract can rack up many logged rows (one per dashboard refresh
-while it was open); the report uses only the closest-to-close snapshot
-per contract for calibration, so a contract you watched closely doesn't
-get counted many times over.
+while it was open); the report scores one row per contract, so a contract
+you watched closely doesn't get counted many times over. That row is the
+one logged nearest `KALSHI_CALIBRATION_HORIZON_MINUTES` (5) before close,
+within `KALSHI_CALIBRATION_HORIZON_TOLERANCE_MINUTES` (1) -- every contract
+is judged at the same distance from settlement. (The closest-to-close row
+would be nearly decided already, with P(YES) near 0 or 1, which says little
+about the model.) The report also scores the logged point-in-time
+probability on the same rows, so you can see whether modelling the
+settlement average actually helped.
 
 **Sample size matters here more than almost anywhere else in this repo.**
 A handful of resolved contracts is nowhere near enough to distinguish a

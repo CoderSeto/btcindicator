@@ -161,11 +161,16 @@ def test_fair_value_wires_inputs_together():
     vol = kalshi.realized_volatility(df, 40)["annual_vol"]
     assert out["annual_vol"] == pytest.approx(vol)
     assert out["current_price"] == closes[-1]
+    # P(YES) prices the 60-second settlement average; the point-in-time N(d2) rides along.
     assert out["p_yes"] == pytest.approx(
+        kalshi.settlement_probability(closes[-1], closes[-1] + 50, 9, vol))
+    assert out["p_yes_point"] == pytest.approx(
         kalshi.crossing_probability(closes[-1], closes[-1] + 50, 9, vol))
     assert out["p_yes"] + out["p_no"] == pytest.approx(1.0)
-    tau = 9 / MIN_PER_YEAR
-    assert out["price_std"] == pytest.approx(closes[-1] * vol * math.sqrt(tau))
+    # sd of the settlement average: 8 min to the window, then the 60-print average's own
+    # variance, (61 * 121) / (6 * 60 * 60) min = 0.3417 min (see the averaging tests below).
+    tau = (8 + 61 * 121 / (6 * 3600)) / MIN_PER_YEAR
+    assert out["price_std"] == pytest.approx(closes[-1] * vol * math.sqrt(tau), rel=1e-9)
 
 
 def test_fair_value_unavailable():
@@ -249,3 +254,47 @@ def test_realized_vol_annualizes_by_the_candle_size_not_by_minutes():
     assert out["samples_requested"] == 120
     fv = kalshi.fair_value(_df(closes), 75_000, 7.5, lookback_minutes, candle_seconds=300)
     assert fv["annual_vol"] == pytest.approx(expected, rel=1e-12)
+
+
+
+# ---------- the settlement-average model (REVIEW_FINDINGS D4) ----------
+
+def test_settlement_variance_time_hand_computed():
+    # 60 one-second prints ending at close, all still ahead (T >= 59s): the mean of W at
+    # u_k = (T - 60s) + k s has variance (1/60^2) * sum_k u_k * (2(60 - k) + 1)
+    #   = (T - 60s) + (1/3600) * sum_{k=1..60} k * (121 - 2k) s
+    #   = (T - 60s) + 73810 / 3600 s = (T - 60s) + (61 * 121) / 360 s.
+    for t_s in (60.0, 120.0, 900.0):
+        want = (t_s - 60.0) + 61 * 121 / 360.0
+        assert kalshi.settlement_variance_seconds(t_s) == pytest.approx(want, rel=1e-12)
+    # Inside the window only future prints are random: T = 10s leaves prints at 1..10s ahead,
+    # variance (1/3600) * sum_{i=1..10} i * (2(10 - i) + 1) = 385 / 3600.
+    assert kalshi.settlement_variance_seconds(10.0) == pytest.approx(385 / 3600, rel=1e-12)
+    assert kalshi.settlement_variance_seconds(0.0) == 0.0
+
+
+@pytest.mark.parametrize("minutes", [1.0, 2.0, 5.0, 14.0])
+@pytest.mark.parametrize("side", [+1, -1])
+def test_settlement_probability_matches_monte_carlo_of_the_real_rule(minutes, side):
+    # Cross-checked against the independent second-by-second simulation above, not a
+    # re-derivation of the formula.
+    spot = 75_000.0
+    strike = spot / (1 + side * 5e-4)
+    model = kalshi.settlement_probability(spot, strike, minutes, 0.45)
+    true_p, se = _averaged_settlement_mc(spot, strike, minutes, 0.45, n=200_000)
+    assert model == pytest.approx(true_p, abs=4 * se + 1e-3)
+
+
+def test_settlement_probability_is_never_less_extreme_than_the_point_model():
+    for minutes in (0.5, 1, 3, 10):
+        for k in (74_900, 74_990, 75_010, 75_100):
+            pt = kalshi.crossing_probability(75_000, k, minutes, 0.45)
+            avg = kalshi.settlement_probability(75_000, k, minutes, 0.45)
+            assert abs(avg - 0.5) >= abs(pt - 0.5) - 1e-12
+
+
+def test_settlement_probability_expired_and_bad_input():
+    p = kalshi.settlement_probability
+    assert p(100, 100, 0, 0.5) == 1.0 and p(99, 100, -1, None) == 0.0
+    with pytest.raises(ValueError):
+        p(100, 100, 5, 0)

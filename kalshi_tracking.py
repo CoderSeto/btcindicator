@@ -27,9 +27,17 @@ Two pieces:
      price" is a meaningful bar, not a strawman.
 
 Each contract can have many logged rows (one per refresh while it was
-open); the calibration report uses only the LAST (closest-to-close) row
-per ticker, since that's the most-informed snapshot and using every row
-would pseudo-replicate a single contract's outcome many times over.
+open); the calibration report scores ONE row per ticker -- using every row
+would pseudo-replicate a single contract's outcome many times over. It
+takes the row nearest a fixed horizon (KALSHI_CALIBRATION_HORIZON_MINUTES
+before close), so every contract is judged at the same distance from
+settlement. (It used to take the closest-to-close row, which is nearly
+decided by then and measured the model where it matters least.)
+
+Rows carry both the averaged-settlement P(YES) and the point-in-time N(d2)
+(`p_yes_point`), and the report scores both, so whether modelling the
+60-second settlement average actually helped is an empirical question the
+log can answer.
 
 Run standalone: python kalshi_tracking.py
 """
@@ -47,11 +55,13 @@ from csv_utils import needs_header
 PREDICTION_LOG_HEADER = [
     "timestamp", "ticker", "strike", "current_price", "minutes_remaining",
     "p_yes", "annual_vol", "kalshi_yes_bid", "kalshi_yes_ask", "kalshi_last_price",
+    "p_yes_point",
 ]
 
 
 def log_prediction(cfg, ticker, strike, current_price, minutes_remaining, p_yes, annual_vol,
-                    kalshi_yes_bid=None, kalshi_yes_ask=None, kalshi_last_price=None):
+                    kalshi_yes_bid=None, kalshi_yes_ask=None, kalshi_last_price=None,
+                    p_yes_point=None):
     """
     Appends one fair-value snapshot to the predictions log. Only active
     when cfg.LOG_KALSHI_PREDICTIONS is True. `ticker` should be the real
@@ -77,6 +87,7 @@ def log_prediction(cfg, ticker, strike, current_price, minutes_remaining, p_yes,
             kalshi_yes_bid if kalshi_yes_bid is not None else "",
             kalshi_yes_ask if kalshi_yes_ask is not None else "",
             kalshi_last_price if kalshi_last_price is not None else "",
+            p_yes_point if p_yes_point is not None else "",
         ])
 
 
@@ -126,30 +137,44 @@ def _bucket_label(lower: float, upper: float) -> str:
     return f"{lower * 100:.0f}-{upper * 100:.0f}%"
 
 
-def compute_calibration(df: pd.DataFrame, outcomes: dict, bucket_size: float, min_sample: int) -> dict:
+def compute_calibration(df: pd.DataFrame, outcomes: dict, bucket_size: float, min_sample: int,
+                        horizon_minutes: float = None, horizon_tolerance: float = None) -> dict:
     """
     Returns {"model": DataFrame, "kalshi_market": DataFrame or None,
-    "model_brier": float, "kalshi_brier": float or None, "n_resolved": int}.
+    "model_brier": float, "kalshi_brier": float or None,
+    "point_brier": float or None, "n_resolved": int}.
 
-    Deduplicates to one row per ticker first (the row with the smallest
-    minutes_remaining -- the closest-to-close, most-informed snapshot),
-    then keeps only tickers with a known outcome.
+    Deduplicates to one row per ticker first, then keeps only tickers with a
+    known outcome. With `horizon_minutes`, that row is the one whose
+    minutes_remaining is nearest the horizon, and tickers with no row within
+    `horizon_tolerance` of it are left out; without it, the smallest
+    minutes_remaining (closest to close).
+
+    `point_brier` scores the logged point-in-time N(d2) (`p_yes_point`) on the
+    same rows, when the log has it.
     """
+    empty = {"model": pd.DataFrame(), "kalshi_market": None, "model_brier": None,
+             "kalshi_brier": None, "point_brier": None, "n_resolved": 0}
     if df.empty or not outcomes:
-        return {"model": pd.DataFrame(), "kalshi_market": None,
-                "model_brier": None, "kalshi_brier": None, "n_resolved": 0}
+        return empty
 
     df = df[df["ticker"].astype(str).str.len() > 0].copy()
+    if horizon_minutes is not None:
+        df["_distance"] = (df["minutes_remaining"] - horizon_minutes).abs()
+        if horizon_tolerance is not None:
+            df = df[df["_distance"] <= horizon_tolerance]
+        order = "_distance"
+    else:
+        order = "minutes_remaining"
     # drop_duplicates keeps one whole row per ticker. (groupby().first() would
-    # take the first non-null value per *column*, so a closest-to-close row with
-    # no Kalshi quote would silently borrow an older row's quote.)
-    df = df.sort_values("minutes_remaining", kind="stable").drop_duplicates("ticker", keep="first")
+    # take the first non-null value per *column*, so the chosen row with no
+    # Kalshi quote would silently borrow another row's quote.)
+    df = df.sort_values(order, kind="stable").drop_duplicates("ticker", keep="first")
     df["outcome"] = df["ticker"].map(outcomes)
     df = df.dropna(subset=["outcome"])
 
     if df.empty:
-        return {"model": pd.DataFrame(), "kalshi_market": None,
-                "model_brier": None, "kalshi_brier": None, "n_resolved": 0}
+        return empty
 
     df["actual"] = (df["outcome"] == "yes").astype(int)
 
@@ -188,11 +213,18 @@ def compute_calibration(df: pd.DataFrame, outcomes: dict, bucket_size: float, mi
             kalshi_table = _bucketize(with_quote["kalshi_mid"])
             kalshi_brier = ((with_quote["kalshi_mid"] - with_quote["actual"]) ** 2).mean()
 
+    point_brier = None
+    if "p_yes_point" in df.columns:
+        with_point = df.dropna(subset=["p_yes_point"])
+        if not with_point.empty:
+            point_brier = ((with_point["p_yes_point"] - with_point["actual"]) ** 2).mean()
+
     return {
         "model": model_table,
         "kalshi_market": kalshi_table,
         "model_brier": model_brier,
         "kalshi_brier": kalshi_brier,
+        "point_brier": point_brier,
         "n_resolved": len(df),
     }
 
@@ -226,14 +258,24 @@ def resolve_and_report(cfg):
     cache = resolve_outcomes(tickers, cache)
     save_outcomes_cache(cfg.KALSHI_OUTCOMES_CACHE_PATH, cache)
 
-    result = compute_calibration(df, cache, cfg.KALSHI_CALIBRATION_BUCKET_SIZE, cfg.KALSHI_CALIBRATION_MIN_SAMPLE)
+    horizon = getattr(cfg, "KALSHI_CALIBRATION_HORIZON_MINUTES", None)
+    tolerance = getattr(cfg, "KALSHI_CALIBRATION_HORIZON_TOLERANCE_MINUTES", None)
+    result = compute_calibration(df, cache, cfg.KALSHI_CALIBRATION_BUCKET_SIZE, cfg.KALSHI_CALIBRATION_MIN_SAMPLE,
+                                 horizon_minutes=horizon, horizon_tolerance=tolerance)
 
-    print(f"\n{result['n_resolved']} contracts resolved so far (out of {len(tickers)} logged).\n")
+    print(f"\n{result['n_resolved']} contracts resolved so far (out of {len(tickers)} logged).")
+    if horizon is not None:
+        print(f"Each contract is scored on its prediction logged nearest {horizon:.1f} +/- "
+              f"{tolerance:.1f} minutes before close; contracts with no row in that range are left out.")
+    print()
 
     print("Model calibration (does an 'X%' prediction actually resolve YES ~X% of the time?):")
     _print_table(result["model"])
     if result["model_brier"] is not None:
         print(f"  Model Brier score: {result['model_brier']:.4f}  (lower is better; 0 = perfect, 0.25 = always guessing 50%)")
+    if result.get("point_brier") is not None:
+        print(f"  Point-in-time model Brier score: {result['point_brier']:.4f}  (the same rows priced "
+              f"as a single print at close, ignoring the 60-second averaging)")
 
     if result["kalshi_market"] is not None:
         print("\nKalshi's own market price calibration, for comparison:")

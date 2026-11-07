@@ -321,6 +321,7 @@ if (kalshi_result["available"] and kalshi_live and kalshi_live["available"]
         kalshi_yes_bid=kalshi_live["yes_bid"],
         kalshi_yes_ask=kalshi_live["yes_ask"],
         kalshi_last_price=kalshi_live["last_price"],
+        p_yes_point=kalshi_result["p_yes_point"],
     )
 
 kalshi_quote = None
@@ -477,6 +478,9 @@ with left:
             if kalshi_live and kalshi_live["available"]:
                 bits.append(f"`{kalshi_live['ticker']}`")
             st.caption(_esc(" \u00b7 ".join(bits)))
+            if kalshi_result["final_minute"]:
+                st.caption("\u26A0\uFE0F Final minute: part of the settlement average is already "
+                           "fixed, and it's assumed to equal the current price. Rough.")
 
             path = _strike_path_liquidity(book_snapshot, kalshi_result, cfg)
             if path:
@@ -685,9 +689,11 @@ with tab_notes, st.container(height=TAB_BODY_HEIGHT, border=False):
             "source (CF Benchmarks' multi-exchange Real-Time Index) -- these can diverge by a "
             "few dollars, especially during a volatile close.\n"
             "- **Settlement averaging:** Kalshi settles on a 60-second average of the reference "
-            "price at close, not a single tick. This model treats it as a single point-in-time "
-            "draw, which makes its P(YES) less extreme than the true probability -- under a "
-            "point early in the window, often 10+ points in the final minute or two.\n"
+            "price at close, not a single tick, and P(YES) prices the 60-second settlement "
+            "average -- which puts it further from 50% than a point-in-time model, by 10+ "
+            "points in the last couple of minutes. In the final minute, prints already taken "
+            "are assumed equal to the current price (their real values aren't available "
+            "here), so treat P(YES) there as rough.\n"
             "- **No drift:** assumes a pure random walk (driftless geometric Brownian motion). "
             "It deliberately ignores the bot's own directional signals.\n"
             "- **Not financial advice.** A calculator, not a guarantee."

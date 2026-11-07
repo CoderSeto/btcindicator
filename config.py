@@ -245,3 +245,10 @@ KALSHI_CALIBRATION_BUCKET_SIZE = 0.2
 # Below this many resolved predictions in a bucket, its calibration rate
 # is flagged as low-sample rather than trusted at face value.
 KALSHI_CALIBRATION_MIN_SAMPLE = 5
+# Which logged row per contract the calibration report scores: the one
+# nearest this many minutes before close, if one lies within the tolerance
+# (contracts with none are left out). A fixed horizon compares like with like.
+# The closest-to-close row (the old choice) is nearly decided by then -- p near
+# 0 or 1 -- so it measured the model where it matters least.
+KALSHI_CALIBRATION_HORIZON_MINUTES = 5.0
+KALSHI_CALIBRATION_HORIZON_TOLERANCE_MINUTES = 1.0

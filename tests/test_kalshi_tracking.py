@@ -15,7 +15,8 @@ import kalshi_api
 import kalshi_tracking as kt
 
 COLUMNS = ["timestamp", "ticker", "strike", "current_price", "minutes_remaining",
-           "p_yes", "annual_vol", "kalshi_yes_bid", "kalshi_yes_ask", "kalshi_last_price"]
+           "p_yes", "annual_vol", "kalshi_yes_bid", "kalshi_yes_ask", "kalshi_last_price",
+           "p_yes_point"]
 
 
 def _cfg(tmp_path, enabled=True):
@@ -251,7 +252,7 @@ def test_report_end_to_end(tmp_path, capsys, fake_market):
 def test_log_rotates_file_written_under_an_older_layout(tmp_path):
     cfg = _cfg(tmp_path)
     path = tmp_path / "preds.csv"
-    old_header = COLUMNS[:-1]                                 # an older release without kalshi_last_price
+    old_header = COLUMNS[:-1]                                 # an older release without p_yes_point
     path.write_text(",".join(old_header) + "\nt,T0,100,101,5,0.6,0.5,,\n")
 
     kt.log_prediction(cfg, "T1", 100, 101, 4, 0.7, 0.5, 0.6, 0.7, 0.65)
@@ -301,3 +302,45 @@ def test_a_prediction_exactly_on_a_bucket_edge_lands_in_the_upper_bucket():
     table = kt.compute_calibration(df, {"A": "yes", "B": "no"}, 0.2, 1)["model"].set_index("bucket")
     assert table.loc["60-80%", "n"] == 1
     assert table.loc["40-60%", "n"] == 1
+
+
+
+# ---------- fixed-horizon calibration and the point-in-time comparison ----------
+
+def test_calibration_at_a_fixed_horizon_uses_the_row_nearest_it():
+    # Closest-to-close rows are nearly decided (p near 0 or 1) and sit where the averaging error
+    # is largest, so they measure the model where it matters least. At a 5-minute horizon:
+    df = _df([
+        ("A", 0.70, 9.0, np.nan, np.nan),
+        ("A", 0.60, 5.4, np.nan, np.nan),    # nearest 5 -> used
+        ("A", 0.99, 0.2, np.nan, np.nan),    # closest to close -> ignored
+        ("B", 0.40, 4.5, np.nan, np.nan),    # used
+        ("C", 0.10, 0.5, np.nan, np.nan),    # nothing within +/-1 minute of 5 -> left out
+    ])
+    res = kt.compute_calibration(df, {"A": "yes", "B": "no", "C": "no"}, 0.2, 1,
+                                 horizon_minutes=5.0, horizon_tolerance=1.0)
+    assert res["n_resolved"] == 2
+    assert res["model_brier"] == pytest.approx(((0.6 - 1) ** 2 + 0.4 ** 2) / 2)
+
+
+def test_calibration_scores_the_point_in_time_model_alongside_when_logged():
+    df = _df([("A", 0.80, 5.0, np.nan, np.nan), ("B", 0.30, 5.0, np.nan, np.nan)])
+    df["p_yes_point"] = [0.70, 0.40]
+    res = kt.compute_calibration(df, {"A": "yes", "B": "no"}, 0.2, 1, horizon_minutes=5.0, horizon_tolerance=1.0)
+    assert res["model_brier"] == pytest.approx((0.2 ** 2 + 0.3 ** 2) / 2)
+    assert res["point_brier"] == pytest.approx((0.3 ** 2 + 0.4 ** 2) / 2)
+
+
+def test_report_states_its_horizon(tmp_path, capsys, fake_market):
+    markets, _ = fake_market
+    cfg = _cfg(tmp_path)
+    cfg.KALSHI_CALIBRATION_HORIZON_MINUTES = 5.0
+    cfg.KALSHI_CALIBRATION_HORIZON_TOLERANCE_MINUTES = 1.0
+    kt.log_prediction(cfg, "A", 100, 101, 5.2, 0.7, 0.5, 0.6, 0.7, p_yes_point=0.65)
+    kt.log_prediction(cfg, "A", 100, 101, 0.1, 0.99, 0.5, 0.98, 0.99, p_yes_point=0.9)
+    markets["A"] = {"result": "yes"}
+    kt.resolve_and_report(cfg)
+    out = capsys.readouterr().out
+    assert "5.0 +/- 1.0 minutes before close" in out
+    assert "Model Brier score: 0.0900" in out                              # the 5.2-minute row, not 0.1
+    assert "Point-in-time model Brier score: 0.1225" in out
