@@ -369,14 +369,17 @@ such, not slipped in quietly.
     `tests/test_portability.py` re-runs collection (and the tests that read
     `app.py`) in a child interpreter with UTF-8 mode off and an ASCII locale.
 
-19. **Coinbase's `/candles` is cached for ~5 minutes.** Measured from the
-    user's machine: the newest 1-minute candle advanced 23:17 -> 23:22 ->
-    23:27, with its close frozen in between, so a "latest price" read off it
-    was up to 5 minutes old and $48 off `/ticker`. It even served a forming
-    candle's 24-second-old snapshot unchanged for 5 minutes. Take any price
-    someone acts on from `data_fetch.latest_price()` (the ticker, with a
-    flagged fallback). Never call the network from tests: `tests/conftest.py`
-    makes any real HTTP request raise.
+19. **Coinbase's bare `/candles` URL is CDN-cached for 5 minutes.** It
+    comes back `cache-control: public, max-age=300`, a Cloudflare `HIT`.
+    Measured from the user's machine, the newest 1-minute candle advanced
+    23:17 -> 23:22 -> 23:27, with its close frozen in between (even a forming
+    candle's 24-second-old snapshot), up to 5 minutes old and $48 off
+    `/ticker`. The same request with `start`/`end` is a `MISS` with the
+    just-closed minute, so `get_candles` always sends a range ending now.
+    Never drop it to "simplify". Any price someone acts on still comes from
+    `data_fetch.latest_price()` (the ticker, with a flagged fallback),
+    because even a fresh candle lags the last trade. Never call the network
+    from tests: `tests/conftest.py` makes any real HTTP request raise.
 
 ## Testing approach
 

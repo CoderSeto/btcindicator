@@ -1,8 +1,8 @@
 """
 The console loop (main.run) and the Kalshi CLI (python kalshi.py) read the live
-price the way the dashboard does: from Coinbase's ticker, because the candles
-endpoint is cached ~5 minutes (measured from the user's machine, 2026-11-07),
-and with a printed warning when they have to fall back to the newest candle.
+price the way the dashboard does: from Coinbase's ticker, because a candle's
+close lags it (and the bare candles URL was CDN-cached ~5 minutes, measured
+from the user's machine on 2026-11-07), and with a printed warning when they have to fall back to the newest candle.
 
 Both entry points are driven for real: main.run() for one pass of its loop
 (the sleep at the end of the pass raises KeyboardInterrupt, which is how the
@@ -58,7 +58,7 @@ def test_console_falls_back_to_the_candle_and_says_it_may_be_stale(coinbase, mon
     coinbase.ticker = None
     out = _one_console_pass(monkeypatch, capsys)
     assert f"${coinbase.df['close'].iloc[-1]:,.2f}" in out
-    assert "ticker down" in out and "5 minutes" in out
+    assert "ticker down" in out and "lag the last trade" in out
     assert "[error]" not in out
 
 
@@ -78,4 +78,4 @@ def test_kalshi_cli_warns_when_it_falls_back_to_the_candle(coinbase, monkeypatch
     coinbase.ticker = None
     out = _run_kalshi_cli(monkeypatch, capsys, "--strike", "75700", "--minutes", "5")
     assert f"${coinbase.df['close'].iloc[-1]:,.2f}  (from candles)" in out
-    assert "!! ticker unavailable (ticker down)" in out and "5 minutes" in out
+    assert "!! ticker unavailable (ticker down)" in out and "lag the last trade" in out

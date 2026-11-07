@@ -875,8 +875,7 @@ def test_a_failed_ticker_falls_back_to_the_candle_and_warns_it_may_be_stale(env)
     assert metric(at, "BTC-USD").value == f"${env.df['close'].iloc[-1]:,.2f}"
     stale = [c.value for c in at.caption if "not the ticker" in c.value]
     assert len(stale) == 2                                                 # header and Kalshi block
-    assert all("ticker down" in c and "5 minutes" in c for c in stale)
-    assert any("Near the close" in c for c in stale)
+    assert all("ticker down" in c and "lag the last trade" in c for c in stale)
 
 
 def test_logged_predictions_record_the_ticker_spot(env):

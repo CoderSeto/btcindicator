@@ -209,10 +209,11 @@ def fair_value(df: pd.DataFrame, strike: float, minutes_remaining: float, lookba
     full picture -- not just the final probability, so every input is
     visible and auditable rather than a number appearing from nowhere.
 
-    Pass `current_price` from the ticker (data_fetch.latest_price): Coinbase's
-    candles endpoint is cached for ~5 minutes, so the last close can be minutes
-    old, which near settlement moves P(YES) by tens of points. Volatility over
-    a 120-minute window barely notices.
+    Pass `current_price` from the ticker (data_fetch.latest_price): a candle's
+    close lags the last trade -- by up to 5 minutes when Coinbase's candle
+    cache was hit (gotcha #19) -- and near settlement a few basis points move
+    P(YES) by tens of points. Volatility over a 120-minute window barely
+    notices.
 
     Returns {"available": False, "reason": ...} if there isn't enough
     data to compute a trustworthy estimate.
@@ -306,7 +307,7 @@ if __name__ == "__main__":
         print(f"\nCurrent price:       ${result['current_price']:,.2f}  (from {spot['source']})")
         if spot["source"] != "ticker":
             print(f"  !! {spot['reason']}; using the newest candle instead. "
-                  f"{data_fetch.CANDLE_CACHE_NOTE}, which can move P(YES) a lot near the close.")
+                  f"{data_fetch.CANDLE_CACHE_NOTE}.")
         print(f"Strike:              ${result['strike']:,.2f}")
         print(f"Minutes remaining:   {result['minutes_remaining']:.1f}")
         print(f"Annualized vol:      {result['annual_vol'] * 100:.1f}%  "

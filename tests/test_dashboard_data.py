@@ -378,3 +378,57 @@ def test_load_state_survives_a_failed_ticker_and_flags_the_fallback(tmp_path, ne
     assert st.error is None                                             # not an error state
     assert st.live_price == pytest.approx(net.df["close"].iloc[-1])
     assert st.live_price_source == "candles" and "429" in st.live_price_note
+
+
+# ---------- get_candles always asks for a range, never the CDN-cached bare URL ----------
+# From the user's machine, 2026-11-07, 23:44:08 UTC: `/candles?granularity=60` came back
+# `cf-cache-status: HIT, age: 113, cache-control: public, max-age=300` with newest candle 23:42,
+# while the same request with start/end was a MISS whose newest candle was 23:43.
+
+def _capture_candle_requests(monkeypatch, rows):
+    seen = []
+
+    def get(url, params=None, **k):
+        seen.append((url, dict(params or {})))
+        return _Resp(rows)
+    monkeypatch.setattr(data_fetch.requests, "get", get)
+    return seen
+
+
+def test_get_candles_sends_a_range_ending_now(monkeypatch):
+    now = pd.Timestamp("2026-11-07T23:44:08.25Z").to_pydatetime()
+    rows = [[1_794_354_000 - 60 * i, 1.0, 2.0, 1.5, 1.6, 3.0] for i in range(250)]   # newest first
+    seen = _capture_candle_requests(monkeypatch, rows)
+    df = data_fetch.get_candles("BTC-USD", 60, limit=200, now=now)
+    (url, params), = seen
+    assert url == "https://api.exchange.coinbase.com/products/BTC-USD/candles"
+    assert params["granularity"] == 60
+    end, start = pd.Timestamp(params["end"]), pd.Timestamp(params["start"])
+    assert end == pd.Timestamp(now)
+    assert (end - start).total_seconds() == 60 * 201            # the limit, plus a possibly forming bucket
+    assert len(df) == 200 and df["time"].is_monotonic_increasing
+
+
+def test_get_candles_range_stays_inside_coinbases_300_candle_cap(monkeypatch):
+    seen = _capture_candle_requests(monkeypatch, [])
+    data_fetch.get_candles("BTC-USD", 300, limit=1000, now=pd.Timestamp("2026-11-07T23:44:08Z").to_pydatetime())
+    (_, params), = seen
+    span = (pd.Timestamp(params["end"]) - pd.Timestamp(params["start"])).total_seconds() / 300
+    assert span + 1 <= 300                                      # even an unaligned start stays under 300 buckets
+
+
+def test_consecutive_get_candles_calls_never_reuse_a_url(monkeypatch):
+    # The cache keys on the URL; two calls a second apart must not share one.
+    seen = _capture_candle_requests(monkeypatch, [])
+    t = pd.Timestamp("2026-11-07T23:44:08Z").to_pydatetime()
+    data_fetch.get_candles("BTC-USD", 60, now=t)
+    data_fetch.get_candles("BTC-USD", 60, now=t + pd.Timedelta(seconds=1))
+    assert seen[0][1] != seen[1][1]
+
+
+def test_get_candles_as_the_app_calls_it_never_sends_the_bare_cached_url(monkeypatch):
+    seen = _capture_candle_requests(monkeypatch, [])
+    data_fetch.get_candles("BTC-USD", 60, 200)                  # the call dashboard_data/main make
+    (_, params), = seen
+    assert {"start", "end"} <= params.keys(), "the bare URL is CDN-cached for 300s"
+    assert abs(pd.Timestamp(params["end"]) - pd.Timestamp.now(tz="UTC")) < pd.Timedelta(seconds=5)

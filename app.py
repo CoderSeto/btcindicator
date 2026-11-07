@@ -262,7 +262,7 @@ if state.error:
 
 df, imbalance, snapshot = state.df, state.imbalance, state.snapshot
 # Signals are scored on completed candles (`df`); the header price and the
-# Kalshi model use the ticker's last trade (candles are cached ~5 minutes).
+# Kalshi model use the ticker's last trade (a candle's close can lag it).
 live_price, price_df = state.live_price, state.price_df
 stale_price_warning = None
 if state.live_price_source != "ticker":
@@ -363,8 +363,8 @@ with head_cols[0]:
     with st.container(border=True):
         st.metric(product_id, f"${live_price:,.2f}",
                   help="Last trade, from Coinbase's ticker. The signals below are scored on "
-                       "completed candles only, like the backtest, and Coinbase refreshes its "
-                       "candles about every 5 minutes, so they can lag this by several minutes.")
+                       "completed candles only, like the backtest, so they can lag this by up "
+                       "to one candle.")
         if stale_price_warning:
             st.caption(_esc(stale_price_warning))
 with head_cols[1]:
@@ -492,7 +492,7 @@ with left:
                 bits.append(f"`{kalshi_live['ticker']}`")
             st.caption(_esc(" \u00b7 ".join(bits)))
             if stale_price_warning:
-                st.caption(_esc(stale_price_warning + " Near the close that moves P(YES) a lot."))
+                st.caption(_esc(stale_price_warning))
             if kalshi_result["final_minute"]:
                 st.caption("\u26A0\uFE0F Final minute: part of the settlement average is already "
                            "fixed, and it's assumed to equal the current price. Rough.")

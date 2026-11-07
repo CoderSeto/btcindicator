@@ -24,8 +24,8 @@ class DashboardState:
     # The price now, from Coinbase's ticker (data_fetch.latest_price). Signals
     # are scored on completed candles only (see data_fetch.drop_forming_candle);
     # what a person reads as "the price now", and the Kalshi model, use this.
-    # If the ticker failed it's the newest candle's close, which can be ~5
-    # minutes stale (data_fetch.CANDLE_CACHE_NOTE) -- live_price_source says so.
+    # If the ticker failed it's the newest candle's close, which can lag by a
+    # minute or more (data_fetch.CANDLE_CACHE_NOTE) -- live_price_source says so.
     live_price: Optional[float] = None
     live_price_source: Optional[str] = None     # "ticker" or "candles"
     live_price_note: Optional[str] = None       # why it isn't the ticker, if it isn't

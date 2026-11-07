@@ -2,7 +2,7 @@
 Thin wrapper around Coinbase Exchange's public market data REST API.
 No API key is required for these endpoints (they're read-only market data).
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 import pandas as pd
@@ -11,13 +11,32 @@ BASE_URL = "https://api.exchange.coinbase.com"
 HEADERS = {"User-Agent": "btc-indicator-bot/1.0"}
 
 
-def get_candles(product_id: str, granularity: int, limit: int = 200) -> pd.DataFrame:
+# Coinbase rejects a candle request spanning more than 300 buckets; one under
+# that leaves room for an unaligned start touching one extra bucket.
+MAX_CANDLE_SPAN = 299
+
+
+def get_candles(product_id: str, granularity: int, limit: int = 200, now: datetime = None) -> pd.DataFrame:
     """
-    Fetch recent OHLCV candles.
+    Fetch recent OHLCV candles (at most MAX_CANDLE_SPAN).
     Coinbase returns candles as [time, low, high, open, close, volume].
+
+    Always sends an explicit start/end ending *now*. The bare
+    `/candles?granularity=N` URL is the same on every call, and Coinbase serves
+    it with `Cache-Control: public, max-age=300`: from the user's machine it
+    came back a Cloudflare HIT, 113s old, its newest candle two minutes behind,
+    and over 10 minutes it advanced only every 5 (gotcha #19). A range ending
+    at the current instant is a different URL every call, so it's a MISS that
+    returned the minute that had just closed.
     """
+    now = now or datetime.now(timezone.utc)
+    span = min(limit + 1, MAX_CANDLE_SPAN)             # +1: the newest bucket may still be forming
     url = f"{BASE_URL}/products/{product_id}/candles"
-    params = {"granularity": granularity}
+    params = {
+        "granularity": granularity,
+        "start": (now - timedelta(seconds=granularity * span)).isoformat(),
+        "end": now.isoformat(),
+    }
     resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
     resp.raise_for_status()
     raw = resp.json()
@@ -58,8 +77,7 @@ def drop_forming_candle(df: pd.DataFrame, granularity: int, now: datetime = None
 def get_candles_range(product_id: str, granularity: int, start, end) -> pd.DataFrame:
     """
     Fetch candles for a specific start/end range (used for backtesting).
-    The live bot uses get_candles() instead, which just returns the most
-    recent candles without needing a range.
+    The live bot uses get_candles() instead, which picks a range ending now.
     `start`/`end` accept anything pandas.Timestamp can parse.
     """
     url = f"{BASE_URL}/products/{product_id}/candles"
@@ -102,15 +120,14 @@ def get_ticker(product_id: str) -> dict:
     return resp.json()
 
 
-# The bare `/candles?granularity=N` URL is served from a cache that Coinbase
-# refreshes about every 5 minutes: measured on 2026-11-07, the newest candle
-# went 23:17 -> 23:22 -> 23:27 and its close stayed frozen in between, so a
-# price read off it was up to ~5 minutes old and $48 (~6bp) off the ticker.
-# That's fine for indicators on 120-minute windows and fatal for a Kalshi
-# contract a minute from settling. The price people read and the Kalshi model
-# use comes from the ticker instead.
-CANDLE_CACHE_NOTE = ("Coinbase serves the candles endpoint from a cache refreshed about every "
-                     "5 minutes, so this price can be up to ~5 minutes old")
+# A price for someone to act on comes from the ticker, not a candle. The bare
+# candles URL was CDN-cached for 5 minutes (measured 2026-11-07: up to 314s
+# old, $48 / ~6bp off the ticker; get_candles now sends a range to avoid the
+# cache), and even a fresh candle's close is only as recent as its last trade
+# before the request -- the newest bucket may be the one that just closed. A
+# minute is a lot for a Kalshi contract near settlement.
+CANDLE_CACHE_NOTE = ("A candle's close can lag the last trade by a minute or more, which near a "
+                     "Kalshi close is a lot")
 
 
 def latest_price(product_id: str, candles: pd.DataFrame = None) -> dict:
