@@ -27,7 +27,7 @@ Known limitations, stated plainly rather than glossed over:
     terminal variance (to roughly sigma^2 * (T - 2/3 min) instead of
     sigma^2 * T), so the true probability is MORE extreme than this
     model's -- the model is too close to 50%, never too far from it. The
-    gap is small early in the window (~1 point at 14 min) and large near
+    gap is small early in the window (under a point at 14 min) and large near
     the end: with 1 minute left and spot 5bp above the strike the model
     says ~79% where the averaged settlement is ~92% (see
     tests/test_kalshi.py::test_settlement_averaging_makes_the_true_

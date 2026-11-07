@@ -638,7 +638,7 @@ Worth understanding *why* a gap exists before trusting it.
   a single point-in-time draw. Averaging lowers the variance of what
   actually settles, so the true probability is *more* extreme than the
   model's -- the model is too close to 50%, never too far from it. That's
-  about a point early in the window, but large at the end: with 1 minute
+  under a point early in the window, but large at the end: with 1 minute
   left and spot 5bp above the strike the model says ~79% where the
   averaged settlement is ~92%.
 - **No drift, no jumps.** Standard simplifying assumption for pricing

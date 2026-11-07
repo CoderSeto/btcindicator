@@ -670,7 +670,7 @@ with tab_notes, st.container(height=TAB_BODY_HEIGHT, border=False):
             "few dollars, especially during a volatile close.\n"
             "- **Settlement averaging:** Kalshi settles on a 60-second average of the reference "
             "price at close, not a single tick. This model treats it as a single point-in-time "
-            "draw, which makes its P(YES) less extreme than the true probability -- about a "
+            "draw, which makes its P(YES) less extreme than the true probability -- under a "
             "point early in the window, often 10+ points in the final minute or two.\n"
             "- **No drift:** assumes a pure random walk (driftless geometric Brownian motion). "
             "It deliberately ignores the bot's own directional signals.\n"
