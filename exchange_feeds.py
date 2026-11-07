@@ -157,12 +157,26 @@ def _parse_iso_time(s) -> float:
 # live connection.
 
 def parse_coinbase_match(msg: dict) -> Optional[dict]:
-    """Coinbase Exchange 'matches' channel. 'side' is already the taker side."""
+    """
+    Coinbase Exchange 'matches' channel. 'side' is the MAKER order's side --
+    the resting order that was filled -- so the taker (aggressor) traded the
+    other way: side "sell" means a resting sell was lifted by a taker BUY.
+
+    This was once read as the taker side, which counted every Coinbase trade
+    backwards in agg_delta. Coinbase's own client applies a match to the
+    order book of `side`, looking up `maker_order_id` there (see
+    tests/test_exchange_feeds.py for the source). Binance's `m` and Bybit's
+    `S` describe the same thing with different conventions; all three are
+    normalized to the taker side here.
+    """
     if msg.get("type") != "match":
         return None
     try:
+        maker_side = msg["side"]
+        if maker_side not in ("buy", "sell"):
+            return None
         return {
-            "side": msg["side"],  # "buy" or "sell"
+            "side": "buy" if maker_side == "sell" else "sell",  # taker side
             "price": float(msg["price"]),
             "size": float(msg["size"]),
             "time": _parse_iso_time(msg.get("time")),

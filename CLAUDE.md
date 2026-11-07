@@ -339,6 +339,17 @@ such, not slipped in quietly.
     anywhere else. `review/csv_writer_race.py` shows before and after;
     `tests/test_csv_utils.py` stress-tests it with separate processes.
 
+17. **Coinbase's `match.side` is the MAKER's side.** A match with side
+    `"sell"` filled a resting sell order, so the taker *bought*.
+    `parse_coinbase_match()` once passed it through as the taker side,
+    which counted every Coinbase trade backwards in the live `agg_delta`
+    (and labelled Coinbase whale trades backwards) while Binance's `m`
+    and Bybit's `S` were read correctly. Same family as gotcha #3: three
+    venues, three conventions for "who was the aggressor". Every trade
+    parser must return the TAKER side; `tests/test_exchange_feeds.py`
+    pins it per venue and checks that one taker-buy normalizes to "buy"
+    on all three.
+
 ## Testing approach
 
 There **is** now a committed suite, in `tests/`, run with `pytest` (add
@@ -389,10 +400,14 @@ using Streamlit's `AppTest` (the real `app.py` runs; only Coinbase REST, the
 feed handles and Kalshi's API are stubbed, and the live-feed scenario drives a
 real `BookAggregator` on a fake clock). `app.py`'s `_esc` and
 `_strike_path_liquidity` are lifted out with `ast` since a script can't be
-imported. Not covered: `exchange_feeds.py`'s trade/liquidation parsers and
-`TradeAggregator` (the aggregator is only used to build fixtures in
-`test_app.py`; nothing asserts on it), the Coinbase and Bybit runner callbacks,
-and visual layout/CSS, which needs a browser. The Binance.US depth runner's
+imported. `exchange_feeds.py`'s parsers and `TradeAggregator` are covered in
+`tests/test_exchange_feeds.py`, whose docstring names the source of every payload
+(the exchanges' docs sites were unreachable from the sandbox, so Binance and
+Bybit payloads come verbatim from their docs' GitHub sources, Binance futures
+from its official SDK's fixture, and Coinbase's `match` schema and meaning from
+its official client -- re-verify that one against the live docs when you can).
+Not covered: the Coinbase and Bybit runner callbacks, and visual layout/CSS,
+which needs a browser. The Binance.US depth runner's
 resync logic and `run_with_reconnect`'s backoff *are* covered, by driving the
 real callbacks with the socket, threads, sleeps and REST call faked
 (`_BinanceHarness` in `tests/test_orderbook_feeds.py`,
