@@ -56,7 +56,7 @@ def test_drivers_follow_priority_order_and_cap_at_three():
     detail = outlook.build_outlook(s, NO_DIV)["detail"]
     assert detail == (
         "Contributing: RSI is in oversold territory, which has often preceded a short-term bounce; "
-        "MACD just crossed above its signal line; "
+        "MACD is above its signal line; "
         "a volume spike accompanied the last up move."
     )
     assert "moving average" not in detail                                       # 4th driver is cut off
@@ -224,3 +224,13 @@ def test_build_outlook_always_returns_every_key():
         out = outlook.build_outlook(s, NO_DIV)
         assert set(out) == {"headline", "detail", "caution", "book_note", "confidence_lines", "weighted_line"}
         assert isinstance(out["confidence_lines"], list)
+
+
+def test_macd_phrase_describes_a_state_not_a_fresh_cross():
+    # signals.py votes MACD by which side of its signal line it is on (the crossover branch
+    # returns the same answer as the state check), so a MACD that crossed 100 candles ago still
+    # votes. The narrative must not tell the reader it "just crossed".
+    for direction in ("bullish", "bearish"):
+        detail = outlook.build_outlook(snap(macd=direction), NO_DIV)["detail"]
+        assert "just crossed" not in detail
+        assert "MACD is " + ("above" if direction == "bullish" else "below") + " its signal line" in detail

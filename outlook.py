@@ -35,8 +35,10 @@ _DRIVER_PHRASES = {
         "bearish": "resting liquidity is building on the offer and/or thinning on the bid",
     },
     "macd": {
-        "bullish": "MACD just crossed above its signal line",
-        "bearish": "MACD just crossed below its signal line",
+        # A state, not an event: signals.py votes MACD by which side of its
+        # signal line it is on, however long ago it crossed.
+        "bullish": "MACD is above its signal line",
+        "bearish": "MACD is below its signal line",
     },
     "volume": {
         "bullish": "a volume spike accompanied the last up move",
