@@ -22,6 +22,14 @@ from datetime import datetime, timezone
 LOCK_STALE_SECONDS = 10.0
 LOCK_TIMEOUT_SECONDS = 15.0
 
+# On Windows, deleting a file that some other process still has open (a waiter
+# reading the lock's age, an antivirus scan of a new file) leaves it "delete
+# pending" until that handle closes, and creating the same name meanwhile fails
+# with access denied rather than "already exists". There, PermissionError means
+# "busy". Elsewhere it means a real permission problem and is raised.
+_PERMISSION_ERROR_MEANS_BUSY = os.name == "nt"
+_RELEASE_RETRY_SECONDS = 0.5
+
 
 class LockTimeout(Exception):
     pass
@@ -39,7 +47,9 @@ def file_lock(path: str, timeout: float = LOCK_TIMEOUT_SECONDS, stale_after: flo
     crashed writer and removed. (Best effort: two waiters that both judge the
     same dead lock stale at the same instant could both get in once. Only a
     crash can cause that, and the worst case is one duplicate header.)
-    Raises LockTimeout after `timeout` seconds.
+    Every wait, including a Windows delete-pending lock (see
+    _PERMISSION_ERROR_MEANS_BUSY) and a lock whose age can't be read, sleeps
+    `poll` and counts against `timeout`; LockTimeout is raised after it.
     """
     lock = path + ".lock"
     deadline = time.monotonic() + timeout
@@ -51,25 +61,44 @@ def file_lock(path: str, timeout: float = LOCK_TIMEOUT_SECONDS, stale_after: flo
             try:
                 age = time.time() - os.path.getmtime(lock)
             except OSError:
-                continue                 # released between the two calls: try again
-            if age > stale_after:
+                age = None               # released, or being deleted, between the two calls
+            if age is not None and age > stale_after:
                 try:
                     os.remove(lock)
                 except OSError:
                     pass
                 continue
-            if time.monotonic() >= deadline:
-                raise LockTimeout(f"{lock} has been held for {age:.1f}s")
-            time.sleep(poll)
+            why = f"has been held for {age:.1f}s" if age is not None else "stayed busy"
+        except PermissionError as e:
+            if not _PERMISSION_ERROR_MEANS_BUSY:
+                raise
+            why = f"stayed busy ({e.strerror})"
+        if time.monotonic() >= deadline:
+            raise LockTimeout(f"{lock} {why}")
+        time.sleep(poll)
     try:
         os.write(fd, str(os.getpid()).encode())
         os.close(fd)
         yield
     finally:
+        _release(lock)
+
+
+def _release(lock: str):
+    # A failed remove would leave the lock in place until it goes stale, holding
+    # every other writer up for LOCK_STALE_SECONDS, so a transient refusal (on
+    # Windows, another process briefly holding the file open) is retried.
+    give_up = time.monotonic() + _RELEASE_RETRY_SECONDS
+    while True:
         try:
             os.remove(lock)
+            return
+        except FileNotFoundError:
+            return
         except OSError:
-            pass
+            if time.monotonic() >= give_up:
+                return
+            time.sleep(0.005)
 
 
 def append_row(path: str, header: list, row: list, skip_if=None,

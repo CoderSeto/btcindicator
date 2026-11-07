@@ -342,6 +342,11 @@ such, not slipped in quietly.
     rotation, duplicate check and write. Never open a log for append
     anywhere else. `review/csv_writer_race.py` shows before and after;
     `tests/test_csv_utils.py` stress-tests it with separate processes.
+    On Windows, a lock deleted while another process still has it open is
+    "delete pending", and re-creating it raises `PermissionError`, not
+    `FileExistsError`; `file_lock` treats that as busy there (only there --
+    elsewhere it's a real permission error) and waits like any other.
+    First seen on the user's Windows machine, where it crashed writers.
 
 17. **Coinbase's `match.side` is the MAKER's side.** A match with side
     `"sell"` filled a resting sell order, so the taker *bought*.

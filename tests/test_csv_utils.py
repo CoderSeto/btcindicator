@@ -131,3 +131,98 @@ def test_skip_if_is_not_consulted_for_a_fresh_file(tmp_path):
     path = str(tmp_path / "log.csv")
     assert csv_utils.append_row(path, HEADER, ["t", 1, 0, 1.0], skip_if=lambda: True) is True
     assert len(pd.read_csv(path)) == 1
+
+
+# --- Windows: a lock deleted while someone still has it open ------------------------------------
+# On Windows, deleting the lock while another process holds a handle on it (a waiter reading its
+# age, an antivirus scan of a new file) leaves it "delete pending", and creating it again fails
+# with PermissionError, not FileExistsError. Observed on the user's Windows 11 / Python 3.14
+# machine: the two stress tests above crashed writers with
+#   PermissionError: [Errno 13] Permission denied: '...\\log.csv.lock'
+# These tests reproduce that refusal on any OS by patching os.open for the lock path only.
+
+def _refuse_lock_creation(monkeypatch, times, exc=None):
+    real_open = os.open
+    calls = {"refused": 0}
+
+    def fake_open(path, flags, *args, **kwargs):
+        if str(path).endswith(".lock") and (times is None or calls["refused"] < times):
+            calls["refused"] += 1
+            raise exc or PermissionError(13, "Permission denied", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", fake_open)
+    return calls
+
+
+def test_a_delete_pending_lock_on_windows_is_waited_for_not_a_crash(tmp_path, monkeypatch):
+    monkeypatch.setattr(csv_utils, "_PERMISSION_ERROR_MEANS_BUSY", True, raising=False)
+    calls = _refuse_lock_creation(monkeypatch, times=3)
+    path = str(tmp_path / "log.csv")
+    assert csv_utils.append_row(path, HEADER, ["t", 0, 0, 1.5]) is True
+    assert calls["refused"] == 3
+    assert pd.read_csv(path)["price"].tolist() == [1.5]
+    assert not os.path.exists(path + ".lock")
+
+
+def test_a_lock_that_stays_delete_pending_times_out_and_drops_the_row(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(csv_utils, "_PERMISSION_ERROR_MEANS_BUSY", True, raising=False)
+    _refuse_lock_creation(monkeypatch, times=None)
+    path = str(tmp_path / "log.csv")
+    assert csv_utils.append_row(path, HEADER, ["t", 0, 0, 1.5], lock_timeout=0.1) is False
+    assert "stayed busy" in capsys.readouterr().out
+    assert not os.path.exists(path)
+
+
+def test_off_windows_a_permission_error_is_a_real_error_and_is_raised(tmp_path, monkeypatch):
+    monkeypatch.setattr(csv_utils, "_PERMISSION_ERROR_MEANS_BUSY", False, raising=False)
+    _refuse_lock_creation(monkeypatch, times=None)
+    try:
+        csv_utils.append_row(str(tmp_path / "log.csv"), HEADER, ["t", 0, 0, 1.5], lock_timeout=5)
+    except PermissionError:
+        return
+    raise AssertionError("a genuine permission problem was hidden as a busy lock")
+
+
+def test_a_lock_whose_age_cannot_be_read_still_times_out(tmp_path, monkeypatch):
+    # The age check used to `continue` straight back to os.open with no sleep and no deadline, so
+    # a lock that exists but can't be stat'ed (delete pending on Windows) spun the CPU forever.
+    path = str(tmp_path / "log.csv")
+    open(path + ".lock", "w").close()
+    def unreadable(_):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(os.path, "getmtime", unreadable)
+    outcome = {}
+
+    def take():
+        try:
+            with csv_utils.file_lock(path, timeout=0.2):
+                outcome["got"] = True
+        except csv_utils.LockTimeout as e:
+            outcome["timeout"] = str(e)
+
+    t = threading.Thread(target=take, daemon=True)
+    t.start()
+    t.join(5)
+    assert not t.is_alive(), "file_lock never gave up"
+    assert "stayed busy" in outcome.get("timeout", "")
+
+
+def test_releasing_retries_a_briefly_refused_delete(tmp_path, monkeypatch):
+    # If the release gave up on the first refusal, the lock would sit there until it went stale,
+    # holding every other writer up for LOCK_STALE_SECONDS.
+    real_remove = os.remove
+    refused = {"n": 0}
+
+    def flaky_remove(p):
+        if str(p).endswith(".lock") and refused["n"] < 2:
+            refused["n"] += 1
+            raise PermissionError(13, "Permission denied", str(p))
+        real_remove(p)
+
+    monkeypatch.setattr(os, "remove", flaky_remove)
+    path = str(tmp_path / "log.csv")
+    with csv_utils.file_lock(path):
+        pass
+    assert refused["n"] == 2
+    assert not os.path.exists(path + ".lock")

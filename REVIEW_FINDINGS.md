@@ -143,7 +143,13 @@ commit was checked in a clean worktree with the full suite.
   the B8 tests encode, for example whether `U`/`u` ever overlap across events.
 - **Threads.** Real-thread timing in the runners. The B8 and B9 tests run the callbacks
   deterministically, inline.
-- **Windows.** Append atomicity on Windows (relevant to D7) and the `py` launcher setup.
+- **Windows.** Append atomicity on Windows (relevant to D7) and the `py` launcher setup. *Since checked:* the
+  first Windows run of the suite crashed D7's stress-test writers with `PermissionError` on
+  `log.csv.lock`. Windows refuses to re-create a file that is "delete pending" (deleted while
+  another process still had it open), and `file_lock` only expected `FileExistsError`. The same
+  crash would have hit the dashboard and console bot logging together. It's now treated as a busy
+  lock on Windows; a lock whose age can't be read no longer spins forever; and a refused release is
+  retried. Tests in `tests/test_csv_utils.py` simulate the refusal on any OS.
 - **Visual layout.** Not checked; that needs a browser.
 
 ## Re-running the evidence
