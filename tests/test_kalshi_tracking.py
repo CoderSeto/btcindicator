@@ -281,6 +281,18 @@ def test_header_constant_matches_what_is_written(tmp_path):
 
 # ---------- review regressions (see REVIEW_FINDINGS.md) ----------
 
+def test_report_does_not_query_kalshi_for_a_blank_ticker(tmp_path, capsys, fake_market):
+    # A blank ticker cell reads back as NaN, and str(NaN) is "nan" -- a truthy string that was
+    # counted as a contract and sent to Kalshi as GET /markets/nan on every run.
+    markets, calls = fake_market
+    cfg = _cfg(tmp_path)
+    kt.log_prediction(cfg, None, 100, 101, 5, 0.6, 0.5)
+    kt.log_prediction(cfg, "A", 100, 101, 1, 0.7, 0.5, 0.6, 0.7)
+    markets["A"] = {"result": "yes"}
+    kt.resolve_and_report(cfg)
+    assert calls == ["A"]
+    assert "across 1 unique contracts" in capsys.readouterr().out
+
 
 def test_a_prediction_exactly_on_a_bucket_edge_lands_in_the_upper_bucket():
     # Bounds were built as i * 0.2, and 3 * 0.2 == 0.6000000000000001, so a p_yes of exactly 0.6

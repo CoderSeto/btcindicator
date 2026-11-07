@@ -217,7 +217,8 @@ def resolve_and_report(cfg):
         return
 
     df = load_predictions(cfg.KALSHI_PREDICTIONS_LOG_PATH)
-    tickers = [t for t in df["ticker"].astype(str).unique() if t]
+    # dropna first: a blank ticker cell reads back as NaN, and str(NaN) is "nan".
+    tickers = [t for t in df["ticker"].dropna().astype(str).unique() if t]
     print(f"Loaded {len(df)} logged predictions across {len(tickers)} unique contracts.")
 
     cache = load_outcomes_cache(cfg.KALSHI_OUTCOMES_CACHE_PATH)
