@@ -416,10 +416,10 @@ mock the network, and `kalshi_api.BASE_URL` is `external-api.kalshi.com`, but
 the payloads were captured from `api.elections.kalshi.com`, the host that
 answered from the sandbox. Verify BASE_URL against Kalshi's current docs.
 
-Known coupling, pinned by a test in `tests/test_indicators.py`: `indicators.py`
-names its columns from config (`sma_{SMA_FAST}` ...) but `signals.py` reads the
-literal names `sma_9`, `sma_21`, `ema_12`, `ema_26`. Changing those four config
-values would raise a `KeyError` in the signal layer.
+`signals.py` reads the moving-average columns under the names config implies
+(`sma_{SMA_FAST}` ...), the same way `indicators.py` builds them, so changing
+those periods in config.py just works (`tests/test_signals_price.py`). It used
+to read literal `sma_9`/`ema_12` and raise `KeyError` instead.
 
 ## Common commands
 

@@ -17,6 +17,7 @@ class Cfg:
     later tuning change to config.py can't quietly invalidate them."""
     RSI_OVERBOUGHT = 70
     RSI_OVERSOLD = 30
+    SMA_FAST, SMA_SLOW, EMA_FAST, EMA_SLOW = 9, 21, 12, 26
     IMBALANCE_THRESHOLD = 0.20
     AGG_DELTA_THRESHOLD = 0.15
     BOOK_IMBALANCE_THRESHOLD = 0.18

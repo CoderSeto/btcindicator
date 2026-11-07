@@ -52,24 +52,25 @@ def _evaluate_price_signals(last, prev, cfg) -> dict:
     Split out so the same logic can be reused for backtesting, where only
     historical candles are available -- Coinbase doesn't expose historical
     order-book snapshots.
+
+    Every vote here is read from `last` alone. `prev` is still accepted (the
+    callers and the backtest pass the last two rows) but no longer used: the
+    old crossover branches always returned the same answer as the state
+    check, so they were removed rather than kept as a misleading no-op.
     """
     signals = {}
 
-    # SMA crossover
-    if last["sma_9"] > last["sma_21"] and prev["sma_9"] <= prev["sma_21"]:
-        signals["sma_cross"] = "bullish"
-    elif last["sma_9"] < last["sma_21"] and prev["sma_9"] >= prev["sma_21"]:
-        signals["sma_cross"] = "bearish"
-    else:
-        signals["sma_cross"] = _side(last["sma_9"], last["sma_21"])
+    # Moving-average votes. Column names come from the config, exactly as
+    # indicators.py builds them -- reading literal "sma_9"/"ema_12" here once
+    # turned any change to SMA_FAST etc. into a KeyError.
+    #
+    # These are STATE votes: which side the fast average is on, however long
+    # ago it crossed (a fresh cross and an old one vote the same way).
+    sma_fast, sma_slow = last[f"sma_{cfg.SMA_FAST}"], last[f"sma_{cfg.SMA_SLOW}"]
+    signals["sma_cross"] = _side(sma_fast, sma_slow)
 
-    # EMA crossover
-    if last["ema_12"] > last["ema_26"] and prev["ema_12"] <= prev["ema_26"]:
-        signals["ema_cross"] = "bullish"
-    elif last["ema_12"] < last["ema_26"] and prev["ema_12"] >= prev["ema_26"]:
-        signals["ema_cross"] = "bearish"
-    else:
-        signals["ema_cross"] = _side(last["ema_12"], last["ema_26"])
+    ema_fast, ema_slow = last[f"ema_{cfg.EMA_FAST}"], last[f"ema_{cfg.EMA_SLOW}"]
+    signals["ema_cross"] = _side(ema_fast, ema_slow)
 
     # RSI
     if last["rsi"] < cfg.RSI_OVERSOLD:
@@ -79,13 +80,8 @@ def _evaluate_price_signals(last, prev, cfg) -> dict:
     else:
         signals["rsi"] = "neutral"
 
-    # MACD
-    if last["macd"] > last["macd_signal"] and prev["macd"] <= prev["macd_signal"]:
-        signals["macd"] = "bullish"
-    elif last["macd"] < last["macd_signal"] and prev["macd"] >= prev["macd_signal"]:
-        signals["macd"] = "bearish"
-    else:
-        signals["macd"] = _side(last["macd"], last["macd_signal"])
+    # MACD vs its signal line -- also a state vote.
+    signals["macd"] = _side(last["macd"], last["macd_signal"])
 
     # Bollinger Bands. A zero-width band (no movement over the period) has no
     # "outside" to be stretched to -- the close sits on both bands at once.

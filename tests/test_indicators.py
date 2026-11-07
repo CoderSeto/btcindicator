@@ -260,10 +260,10 @@ def ohlcv(n=120, seed=3):
 
 def test_compute_all_adds_every_column_the_signal_layer_reads():
     out = ind.compute_all(ohlcv(), real_cfg)
-    # signals.py hard-codes these names (sma_9/sma_21/ema_12/ema_26), while indicators.py names
-    # columns from config. Changing SMA_FAST/SMA_SLOW/EMA_FAST/EMA_SLOW would break the signal
-    # layer with a KeyError; this test makes that coupling fail here, with a clear message.
-    for col in ["sma_9", "sma_21", "ema_12", "ema_26", "rsi", "macd", "macd_signal",
+    # signals.py reads the moving averages under the names config implies (sma_{SMA_FAST} ...);
+    # test_signals_price.py checks that a changed period still works end to end.
+    for col in [f"sma_{real_cfg.SMA_FAST}", f"sma_{real_cfg.SMA_SLOW}", f"ema_{real_cfg.EMA_FAST}",
+                f"ema_{real_cfg.EMA_SLOW}", "rsi", "macd", "macd_signal",
                 "bb_upper", "bb_lower", "volume_spike"]:
         assert col in out.columns, f"{col} missing -- signals.py reads it"
 
