@@ -664,3 +664,25 @@ def test_binance_events_arriving_while_the_snapshot_is_applied_are_replayed_in_o
     assert book.ready and book.update_id == 102
     assert book.bids[99998.0] == 2.0 and book.asks[100002.0] == 3.0
     assert h.agg._status["binance_us"] == "connected"
+
+
+def test_walls_at_different_prices_are_tracked_separately():
+    # The match key was round(price / (price * MATCH_BPS / 1e4)) == round(1e4 / MATCH_BPS): the
+    # same number for EVERY price, so all walls on one venue's side collapsed into a single entry.
+    agg = obf.BookAggregator(_Cfg)
+    agg._track_walls([_wall(100_100.0), _wall(100_900.0)], now=1000.0)
+    assert sorted(w["price"] for w in agg._aged_walls(1000.0)) == [100_100.0, 100_900.0]
+
+
+def test_a_new_wall_at_another_price_does_not_inherit_an_old_walls_age():
+    """
+    The spoof case wall age exists to catch: size that appears somewhere new is not "held" just
+    because a different wall sat elsewhere on that side for a while.
+    """
+    agg = obf.BookAggregator(_Cfg)
+    for t in range(1000, 1031):
+        agg._track_walls([_wall(100_100.0)], now=float(t))                  # held 30s at 100,100
+    agg._track_walls([_wall(100_900.0)], now=1031.0)                        # gone; new size 80bps away
+    new = [w for w in agg._aged_walls(1031.0) if w["price"] == 100_900.0]
+    assert len(new) == 1
+    assert new[0]["age_seconds"] == 0.0 and new[0]["held"] is False

@@ -475,8 +475,13 @@ class BookAggregator:
 
         seen = set()
         for wall in walls:
-            bucket_size = max(wall["price"] * cfg.BOOK_WALL_MATCH_BPS / 10_000.0, 1e-9)
-            key = (wall.get("venue"), wall["side"], round(wall["price"] / bucket_size))
+            # Buckets of a fixed width in basis points, i.e. fixed in log price.
+            # (Sizing the bucket from the wall's own price, price / (price * bps),
+            # gave every price the same key, so all walls on a side merged into
+            # one entry and a brand-new wall inherited an old one's age.)
+            bucket_bps = max(cfg.BOOK_WALL_MATCH_BPS, 1e-9)
+            key = (wall.get("venue"), wall["side"],
+                   round(math.log(wall["price"]) * 10_000.0 / bucket_bps))
             seen.add(key)
             entry = self._walls.get(key)
             if entry is None:
