@@ -175,7 +175,7 @@ def log_signal_snapshot(snapshot: signals.SignalSnapshot):
 _ABBR = {"bullish": "BULL", "bearish": "BEAR", "neutral": "NEUT"}
 
 
-def format_status_line(snapshot: signals.SignalSnapshot) -> str:
+def format_status_line(snapshot: signals.SignalSnapshot, live_price: float = None) -> str:
     tags = " ".join(f"{name}:{_ABBR[val]}" for name, val in snapshot.individual.items())
     book = snapshot.book or {}
     if book.get("available"):
@@ -189,7 +189,7 @@ def format_status_line(snapshot: signals.SignalSnapshot) -> str:
                           if snapshot.imbalance is not None else "imbalance=--")
     return (
         f"[{datetime.now().strftime('%H:%M:%S')}] "
-        f"${snapshot.price:,.2f}  "
+        f"${(snapshot.price if live_price is None else live_price):,.2f}  "
         f"composite={snapshot.composite.upper()} ({snapshot.strength}/{len(snapshot.individual)})  "
         f"{imbalance_txt}  "
         f"{tags}"
@@ -280,7 +280,10 @@ def run():
     try:
         while True:
             try:
-                df = data_fetch.get_candles(cfg.PRODUCT_ID, cfg.GRANULARITY, cfg.CANDLE_HISTORY)
+                raw = data_fetch.get_candles(cfg.PRODUCT_ID, cfg.GRANULARITY, cfg.CANDLE_HISTORY)
+                # Signals on completed candles only, like the backtest; the
+                # status line still shows the latest price.
+                df, _ = data_fetch.drop_forming_candle(raw, cfg.GRANULARITY)
                 df = indicators.compute_all(df, cfg)
 
                 book_snapshot = book_handle.snapshot() if book_handle is not None else None
@@ -311,7 +314,7 @@ def run():
                 outlook_result = outlook.build_outlook(snapshot, div, confidence, weighted)
                 log_signal_snapshot(snapshot)
 
-                print(format_status_line(snapshot))
+                print(format_status_line(snapshot, live_price=float(raw["close"].iloc[-1])))
                 for line in format_book_lines(snapshot):
                     print(f"  {line}")
                 print(f"  outlook: {outlook_result['headline']}")

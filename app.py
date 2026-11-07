@@ -260,6 +260,9 @@ if state.error:
     st.stop()
 
 df, imbalance, snapshot = state.df, state.imbalance, state.snapshot
+# Signals are scored on completed candles (`df`); the header price and the
+# Kalshi model want the freshest print, forming candle included.
+live_price, price_df = state.live_price, state.price_df
 book_read = snapshot.book or {}
 outlook_result = state.outlook
 log_signal_snapshot(snapshot)
@@ -295,12 +298,12 @@ if auto_track and kalshi_pair_ok:
         st.session_state["kalshi_minutes"] = round(kalshi_live["minutes_remaining"], 2)
 
 if "kalshi_strike" not in st.session_state:
-    st.session_state["kalshi_strike"] = float(round(snapshot.price))
+    st.session_state["kalshi_strike"] = float(round(live_price))
 if "kalshi_minutes" not in st.session_state:
     st.session_state["kalshi_minutes"] = round(kalshi.minutes_until_next_kalshi_close(), 1)
 
 kalshi_result = kalshi.fair_value(
-    df, st.session_state["kalshi_strike"], st.session_state["kalshi_minutes"],
+    price_df, st.session_state["kalshi_strike"], st.session_state["kalshi_minutes"],
     cfg.KALSHI_VOL_LOOKBACK_MINUTES, candle_seconds=cfg.GRANULARITY,
 )
 
@@ -353,7 +356,9 @@ emoji_map = {"bullish": "\U0001F7E2", "bearish": "\U0001F534", "neutral": "\u26a
 head_cols = st.columns(4)
 with head_cols[0]:
     with st.container(border=True):
-        st.metric(product_id, f"${snapshot.price:,.2f}")
+        st.metric(product_id, f"${live_price:,.2f}",
+                  help="Latest price. The signals below are scored on completed candles only, "
+                       "like the backtest, so they can lag this by up to one candle.")
 with head_cols[1]:
     with st.container(border=True):
         st.metric(

@@ -20,7 +20,12 @@ import weighting
 
 @dataclass
 class DashboardState:
-    df: Optional[pd.DataFrame] = None
+    df: Optional[pd.DataFrame] = None           # COMPLETED candles, with indicators
+    # The freshest price, including a still-forming candle. Signals are scored
+    # on completed candles only (see data_fetch.drop_forming_candle); what a
+    # person reads as "the price now", and the Kalshi model, use this instead.
+    live_price: Optional[float] = None
+    price_df: Optional[pd.DataFrame] = None     # raw candles, forming one included
     imbalance: Optional[float] = None
     snapshot: Optional["signals.SignalSnapshot"] = None
     divergence: dict = field(default_factory=dict)
@@ -44,13 +49,14 @@ def load_state(cfg, feed_snapshot: Optional[dict] = None,
     """
     have_book = bool(book_snapshot and book_snapshot.get("available"))
     try:
-        df = data_fetch.get_candles(cfg.PRODUCT_ID, cfg.GRANULARITY, cfg.CANDLE_HISTORY)
+        raw = data_fetch.get_candles(cfg.PRODUCT_ID, cfg.GRANULARITY, cfg.CANDLE_HISTORY)
         # Only needed for the fallback path -- the live depth feeds already
         # carry a better read of the same thing, so skip the extra request.
         rest_book = None if have_book else data_fetch.get_order_book(cfg.PRODUCT_ID, level=2)
     except Exception as e:
         return DashboardState(error=str(e))
 
+    df, _ = data_fetch.drop_forming_candle(raw, cfg.GRANULARITY)
     min_needed = max(cfg.SMA_SLOW, cfg.BOLLINGER_PERIOD, cfg.MACD_SLOW, cfg.RSI_PERIOD) + 2
     if df.empty or len(df) < min_needed:
         return DashboardState(error="Not enough candle history yet -- try again shortly.")
@@ -76,7 +82,8 @@ def load_state(cfg, feed_snapshot: Optional[dict] = None,
     out = outlook_mod.build_outlook(snap, div, confidence, weighted)
 
     return DashboardState(
-        df=df, imbalance=imbalance, snapshot=snap, divergence=div,
+        df=df, live_price=float(raw["close"].iloc[-1]), price_df=raw,
+        imbalance=imbalance, snapshot=snap, divergence=div,
         outlook=out, backtest_results=backtest_results, feed_snapshot=feed_snapshot,
         book_snapshot=book_snapshot, weighted=weighted,
     )

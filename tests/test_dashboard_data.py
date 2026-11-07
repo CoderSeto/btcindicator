@@ -256,3 +256,59 @@ def test_macd_histogram_colours_follow_sign_and_tolerate_warmup_nans():
 
 def test_figure_renders_to_json():
     assert build_figure(full_frame(), real_cfg).to_json()
+
+
+
+# ---------- the still-forming candle (REVIEW_FINDINGS D5) ----------
+#
+# Coinbase stamps a candle with its bucket's START, so the candle stamped t is still forming until
+# t + granularity. Signals scored on it see a partial close and partial volume (a forming 1-minute
+# candle rarely reaches 2x average volume), while the backtest scored completed candles -- so the
+# hit rates described a different signal from the live one. Whether Coinbase returns the forming
+# candle couldn't be checked from the sandbox; deciding by timestamp makes the answer irrelevant.
+
+from datetime import datetime, timezone
+
+
+def _at(hh, mm, ss=0):
+    return datetime(2026, 11, 7, hh, mm, ss, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("unit", ["s", "ns"])
+def test_drop_forming_candle_decides_by_bucket_start_plus_granularity(unit):
+    df = candles(5)                                                     # 15:00 .. 15:04
+    df["time"] = df["time"].astype(f"datetime64[{unit}]")               # resolution must not matter
+    done, forming = data_fetch.drop_forming_candle(df, 60, now=_at(15, 4, 30))
+    assert len(done) == 4 and forming["close"] == df["close"].iloc[-1]
+    done, forming = data_fetch.drop_forming_candle(df, 60, now=_at(15, 5, 0))   # 15:04 bucket just closed
+    assert len(done) == 5 and forming is None
+    done, forming = data_fetch.drop_forming_candle(df, 300, now=_at(15, 8, 0))  # 5-min buckets: 15:04 open
+    assert len(done) == 4 and forming is not None
+
+
+def test_drop_forming_candle_handles_empty_frames():
+    empty = pd.DataFrame(columns=["time", "low", "high", "open", "close", "volume"])
+    done, forming = data_fetch.drop_forming_candle(empty, 60)
+    assert done.empty and forming is None
+
+
+def test_signals_ignore_the_forming_candle_but_the_live_price_does_not(tmp_path, net):
+    now = pd.Timestamp.now(tz="UTC").tz_localize(None).floor("min")
+    df = candles(200)
+    df["time"] = pd.date_range(end=now, periods=200, freq="min")        # last bucket started this minute
+    df.loc[199, ["close", "high"]] = df.loc[198, "close"] * 1.02        # a partial candle's wild print
+    df.loc[199, "volume"] = 10_000.0                                    # ...and a "volume spike"
+    net.df = df
+    st = dashboard_data.load_state(make_cfg(tmp_path))
+    assert st.error is None
+    assert len(st.df) == 199                                            # signals ran on completed candles
+    assert st.snapshot.price == pytest.approx(df["close"].iloc[198])
+    assert st.live_price == pytest.approx(df["close"].iloc[199])        # the header/Kalshi still see it
+    assert len(st.price_df) == 200
+    assert st.snapshot.individual["volume"] == "neutral"                # the partial candle cast no vote
+
+
+def test_without_a_forming_candle_live_price_is_the_last_close(tmp_path, net):
+    st = dashboard_data.load_state(make_cfg(tmp_path))                  # fixture candles end in the past
+    assert len(st.df) == len(net.df)
+    assert st.live_price == pytest.approx(net.df["close"].iloc[-1]) == pytest.approx(st.snapshot.price)

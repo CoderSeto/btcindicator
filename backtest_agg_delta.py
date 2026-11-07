@@ -46,6 +46,7 @@ import pandas as pd
 
 import backtest
 import config as cfg
+import data_fetch
 import exchange_feeds
 
 
@@ -130,6 +131,7 @@ def run_agg_delta_backtest(cfg) -> dict:
     # Re-fetch the same candle history the base backtest used, for exact
     # aligned timestamps and closing prices to check outcomes against.
     df = backtest.fetch_history(cfg.PRODUCT_ID, cfg.GRANULARITY, cfg.BACKTEST_HISTORY_CANDLES, cfg.BACKTEST_REQUEST_PAUSE)
+    df, _ = data_fetch.drop_forming_candle(df, cfg.GRANULARITY)     # as backtest.py does
     warmup = backtest._warmup_candles(cfg)
     lookahead = cfg.BACKTEST_LOOKAHEAD_CANDLES
     min_needed = warmup + lookahead + 10

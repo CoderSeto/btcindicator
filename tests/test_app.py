@@ -789,3 +789,17 @@ def test_predictions_log_the_point_in_time_model_alongside(env):
     assert row["p_yes_point"] == pytest.approx(want["p_yes_point"])
     assert row["p_yes"] == pytest.approx(want["p_yes"])
     assert row["p_yes"] != pytest.approx(row["p_yes_point"])               # the two models differ
+
+
+
+def test_header_and_kalshi_use_the_live_price_while_signals_wait_for_the_candle_to_close(env):
+    now = pd.Timestamp.now(tz="UTC").tz_localize(None).floor("min")
+    df = env.df.copy()
+    df["time"] = pd.date_range(end=now, periods=len(df), freq="min")     # last candle still forming
+    df.loc[df.index[-1], "close"] = df["close"].iloc[-2] + 25.0
+    env.df = df
+    env.kalshi = {"available": False, "reason": "x"}
+    at = run()
+    no_exception(at)
+    assert metric(at, "BTC-USD").value == f"${df['close'].iloc[-1]:,.2f}"
+    assert f"${df['close'].iloc[-1]:,.2f} vs" in all_text(at).replace("\\$", "$")   # Kalshi caption

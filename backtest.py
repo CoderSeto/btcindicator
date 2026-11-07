@@ -166,6 +166,9 @@ def run_backtest(cfg) -> dict:
     later. Saves results to `BACKTEST_RESULTS_PATH` and also returns them.
     """
     df = fetch_history(cfg.PRODUCT_ID, cfg.GRANULARITY, cfg.BACKTEST_HISTORY_CANDLES, cfg.BACKTEST_REQUEST_PAUSE)
+    # History ends at "now": its last candle may still be forming, and a partial
+    # close is no outcome to score against.
+    df, _ = data_fetch.drop_forming_candle(df, cfg.GRANULARITY)
 
     warmup = _warmup_candles(cfg)
     lookahead = cfg.BACKTEST_LOOKAHEAD_CANDLES

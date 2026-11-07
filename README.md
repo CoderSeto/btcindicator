@@ -745,11 +745,13 @@ dozens of resolved contracts per bucket, not before.
 
 ## Tuning tips
 
-- `GRANULARITY` + refresh interval: for 1-minute candles, refreshing every
-  30s means you'll sometimes see the same candle twice before it closes —
-  that's fine, it just means the last candle's indicators update in place.
-  Coinbase asks that you not poll the candles endpoint too aggressively;
-  every 15–30s is reasonable for 1-minute candles.
+- `GRANULARITY` + refresh interval: signals are scored on **completed**
+  candles only -- the same kind of candle the backtest scored -- so with
+  1-minute candles they change once a minute, however often you refresh.
+  The price in the header (and the Kalshi model) still uses the latest
+  print from the candle that's still forming. Coinbase asks that you not
+  poll the candles endpoint too aggressively; every 15–30s is reasonable
+  for 1-minute candles.
 - Alert threshold: lower it (e.g. 2) for more frequent, noisier alerts;
   raise it (e.g. 5) to only see strong alignment.
 - `IMBALANCE_THRESHOLD` and `ORDER_BOOK_DEPTH` (in `config.py`): these now

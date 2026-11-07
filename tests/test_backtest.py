@@ -482,3 +482,17 @@ def test_confidence_reports_n_eff_and_base_rate_and_flags_on_n_eff():
     sig = backtest.get_confidence(results, _snap(a="bullish", b="bullish", c="bullish"), {}, 15)["signal"]
     assert sig["n"] == 1000 and sig["n_eff"] == 12.0 and sig["base_rate"] == 0.51
     assert sig["low_sample"] is True                                        # 1000 rows, ~12 independent
+
+
+
+def test_a_forming_last_candle_is_not_used_as_an_outcome(scripted, monkeypatch):
+    # fetch_history ends at "now", so its last candle can still be forming; scoring a lookahead
+    # against its partial close would mix a different kind of price into the outcomes.
+    cfg, seen, df = scripted
+    forming = df.copy()
+    forming["time"] = pd.date_range(end=pd.Timestamp.now(tz="UTC").tz_localize(None).floor("min"),
+                                    periods=N, freq="min")
+    monkeypatch.setattr(backtest, "fetch_history", lambda *a, **k: forming.copy())
+    res = backtest.run_backtest(cfg)
+    assert res["candles_used"] == N - 1
+    assert seen["eval"] == list(range(WARMUP, N - 1 - LOOKAHEAD))

@@ -24,7 +24,11 @@ such, not slipped in quietly.
 - `config.py` -- every tunable setting lives here. When in doubt about a
   magic number, check here first; almost nothing is hardcoded elsewhere.
 - `data_fetch.py` -- Coinbase REST: latest candles, order book, and a
-  time-ranged historical candle fetch used by the backtest.
+  time-ranged historical candle fetch used by the backtest. Also
+  `drop_forming_candle()`: a candle is stamped with its bucket's start, so
+  the last one may still be forming. Signals and the backtest use completed
+  candles only; the displayed price and the Kalshi model use the latest
+  print (`DashboardState.live_price` / `price_df`).
 - `exchange_feeds.py` -- live WebSocket feeds (Coinbase, Binance.US,
   Bybit trades + liquidations) feeding into `TradeAggregator`, a
   thread-safe rolling buy/sell aggregator. Also has the Binance.US REST
