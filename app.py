@@ -735,6 +735,7 @@ with tab_notes, st.container(height=TAB_BODY_HEIGHT, border=False):
         st.caption(
             "Weight 1.00 = counts the same as unweighted (no backtest data, or a coin-flip "
             "historical hit rate). Above 1.00 = this indicator's calls have historically been "
-            "right more often; below 1.00 = less often. Order book, book flow and aggregated "
-            "exchange delta always show 1.00."
+            "right more often; below 1.00 = less often. Order book and book flow always show "
+            "1.00 (no historical depth data exists). Aggregated exchange delta shows 1.00 until "
+            "`python backtest_agg_delta.py` has been run, then a Binance.US-only estimate."
         )

@@ -693,3 +693,19 @@ def test_fair_value_uses_the_configured_candle_size(env, monkeypatch):
     at = run()
     want = kalshi.fair_value(env.df, 75_743.66, 7.5, cfg.KALSHI_VOL_LOOKBACK_MINUTES, candle_seconds=300)
     assert metric(at, "P(YES)").value == f"{want['p_yes'] * 100:.1f}%"
+
+
+def test_weights_note_does_not_claim_agg_delta_is_always_unit_weight(env):
+    # weighting.py weights agg_delta from backtest_agg_delta.py's buckets, so once that has run
+    # the table shows a non-1.00 weight right next to a note saying it "always" shows 1.00.
+    go_live(env)                                                           # buy-heavy trades -> agg_delta bullish
+    pathlib.Path(cfg.BACKTEST_RESULTS_PATH).write_text(json.dumps({
+        "product_id": "BTC-USD", "granularity": 60, "candles_used": 4000, "generated_at": "2026-11-07T00:00:00+00:00",
+        "lookahead_candles": 5, "strength_buckets": {}, "divergence_buckets": {},
+        "indicator_buckets": {"agg_delta_bullish": {"hits": 70, "total": 100}},
+    }))
+    at = run()
+    no_exception(at)
+    table = next(d.value for d in at.dataframe if "Weight" in d.value.columns).set_index("Indicator")["Weight"]
+    assert table["Agg. Exchange Delta"] == "1.40"                          # 1 + 2.0 * (0.70 - 0.5)
+    assert "aggregated exchange delta always show 1.00" not in all_text(at)
