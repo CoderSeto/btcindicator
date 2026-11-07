@@ -27,7 +27,7 @@ import orderbook_feeds
 import outlook
 import signals
 import weighting
-from csv_utils import needs_header
+from csv_utils import append_row
 
 
 # Fixed column order for both alert and signal logs, independent of which
@@ -75,10 +75,6 @@ def _book_log_values(snapshot: signals.SignalSnapshot) -> list:
         round(book["persistence_seconds"], 1),
         round(flow, 4) if flow is not None else "",
     ]
-
-
-# Shared with kalshi_tracking.py; kept under the old name for existing callers.
-_needs_header = needs_header
 
 
 def _now() -> datetime:
@@ -136,7 +132,6 @@ def log_alert(snapshot: signals.SignalSnapshot):
     (direction and strength) from less than LOG_MIN_INTERVAL_SECONDS ago,
     which is a rerun or another tab/process seeing the same thing.
     """
-    needs_header = _needs_header(cfg.ALERT_LOG_PATH, ALERT_LOG_HEADER)
     row = (
         [
             _now().isoformat(),
@@ -148,14 +143,11 @@ def log_alert(snapshot: signals.SignalSnapshot):
         + _book_log_values(snapshot)
         + [snapshot.individual.get(name, "") for name in ALL_SIGNAL_NAMES]
     )
-    if not needs_header and _is_repeat(cfg.ALERT_LOG_PATH, ALERT_LOG_HEADER, row,
-                                       same_fields=("composite", "strength")):
-        return
-    with open(cfg.ALERT_LOG_PATH, "a", newline="") as f:
-        writer = csv.writer(f)
-        if needs_header:
-            writer.writerow(ALERT_LOG_HEADER)
-        writer.writerow(row)
+    # append_row checks for a repeat under its file lock, so two writers can't
+    # both decide the row is new.
+    append_row(cfg.ALERT_LOG_PATH, ALERT_LOG_HEADER, row,
+               skip_if=lambda: _is_repeat(cfg.ALERT_LOG_PATH, ALERT_LOG_HEADER, row,
+                                          same_fields=("composite", "strength")))
 
 
 def log_signal_snapshot(snapshot: signals.SignalSnapshot):
@@ -171,19 +163,13 @@ def log_signal_snapshot(snapshot: signals.SignalSnapshot):
     """
     if not cfg.LOG_ALL_SIGNALS:
         return
-    needs_header = _needs_header(cfg.SIGNAL_LOG_PATH, SIGNAL_LOG_HEADER)
     row = (
         [_now().isoformat(), snapshot.price]
         + _book_log_values(snapshot)
         + [snapshot.individual.get(name, "") for name in ALL_SIGNAL_NAMES]
     )
-    if not needs_header and _is_repeat(cfg.SIGNAL_LOG_PATH, SIGNAL_LOG_HEADER, row):
-        return
-    with open(cfg.SIGNAL_LOG_PATH, "a", newline="") as f:
-        writer = csv.writer(f)
-        if needs_header:
-            writer.writerow(SIGNAL_LOG_HEADER)
-        writer.writerow(row)
+    append_row(cfg.SIGNAL_LOG_PATH, SIGNAL_LOG_HEADER, row,
+               skip_if=lambda: _is_repeat(cfg.SIGNAL_LOG_PATH, SIGNAL_LOG_HEADER, row))
 
 
 _ABBR = {"bullish": "BULL", "bearish": "BEAR", "neutral": "NEUT"}

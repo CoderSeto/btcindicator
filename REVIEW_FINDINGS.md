@@ -10,8 +10,9 @@ found no order dependence.
 **Follow-up pass (same day):** the review's three recommended next steps are done, in four
 commits. **D1** and **D6** (shared config, a log row per rerun), **D2** and **D3** (overstated n,
 edge against 50%), and **D4** (the Kalshi model ignored the settlement average, and calibration
-scored the closest-to-close row) are all addressed. 459 tests pass. The rows below say what changed;
-the verdict is updated to match.
+scored the closest-to-close row) are all addressed. **D7**, the concurrent-writer race on the
+CSV logs, is fixed too, and re-measured as worse than first reported. 466 tests pass. The rows
+below say what changed; the verdict is updated to match.
 
 ## Verdict
 
@@ -66,7 +67,7 @@ fix. Every fixed item is its own commit, named in the Evidence column.
 | D4 | Medium | Design concern, **addressed** | `kalshi.py` (`settlement_probability`), `kalshi_tracking.py` | (a) The model ignored the 60s averaging: under 1pt off at 14 min, 1–2pt at 5 min, 3–4pt at 2 min and up to 13pt at 1 min. *Now:* P(YES) prices the average, using the exact variance of the remaining prints. It matches a Monte Carlo of the rule to within 0.001 at 14, 5, 2 and 1 min. The point-in-time N(d2) is logged alongside as `p_yes_point`. In the final minute, prints already taken are assumed equal to spot; the output and the page say so. (b) Calibration scored the row *closest to close*, which is nearly decided. *Now:* it scores the row nearest 5 ± 1 min before close, and scores `p_yes_point` on the same rows for comparison. | `test_kalshi.py::test_settlement_probability_matches_monte_carlo_of_the_real_rule`, `test_kalshi_tracking.py::test_calibration_at_a_fixed_horizon_uses_the_row_nearest_it`; `python review/settlement_averaging.py`; `914f05e` |
 | D5 | Medium | Hypothesis | `data_fetch.py:26`, `signals.py:216` | The live path evaluates the newest Coinbase candle, which I believe is still forming (partial volume, partial close). The backtest scores completed candles. The volume-spike vote is most affected, since a partial candle rarely reaches 2× average volume. The hit rates may therefore describe a slightly different signal from the live one. | Not verifiable here (Coinbase is blocked by the proxy). Check by comparing the last candle across two calls 10s apart. |
 | D6 | Low | Design concern, **addressed** | `main.py` (`_is_repeat`) | The alert and signal logs appended on **every** Streamlit rerun: each 5s refresh, each widget click, each open tab. That duplicated alert rows while a condition held and inflated the n `analyze_correlation.py` reports. *Now:* a repeat of the log's last alert within `LOG_MIN_INTERVAL_SECONDS` (20s) is skipped, and the signal log takes at most one row per interval. A *different* alert is always written. The check reads the file's own last row, so it holds across tabs and the console bot. | `test_log_schema.py` (duplicate-suppression tests), `test_app.py::test_reruns_from_clicks_do_not_duplicate_log_rows`; `bb6dfd2` |
-| D7 | Low | Design concern | `csv_utils.py:7` | With concurrent writers (dashboard plus console, or two tabs), both can see "needs header" and both write one. `pd.read_csv` then turns every numeric column into strings. `os.rename` can also race. | `python review/demo_csv_race.py` → "price dtype: str \| rows: 3 (2 real rows written)" |
+| D7 | **Medium** (was Low) | Confirmed bug, **fixed** | `csv_utils.py` (`append_row`, `file_lock`) | Concurrent writers (dashboard plus console, or several tabs) raced on every log, and it was worse than first reported. With 8 simultaneous writers, a new file got 7–8 header lines, after which `pd.read_csv` turns numeric columns into strings. A writer could read a half-written header and rotate a good file aside. On a layout change, the writers that lost the rename crashed, and 120–241 of 320 rows were lost. *Now:* every log appends through `append_row()`, which holds a cross-process lock file (stdlib `O_EXCL`, Windows-safe; stale after 10s) across the header check, rotation, duplicate check and write. Locked, every trial gives 1 header, 320 rows and at most 1 `.bak`. | `tests/test_csv_utils.py` (separate-process stress tests fail 8/8 runs with the lock disabled); `python review/csv_writer_race.py` |
 | D8 | Low | Design concern | `backtest_agg_delta.py:145,186` | `candle_times` are candle **open** times, but the outcome is measured from `close[i]`, 60s later. The replayed agg_delta is therefore one candle staler than the live reading. This is not look-ahead; it biases the agg_delta hit rate (likely downward). | Code reading |
 | D9 | Low | Design concern | `exchange_feeds.py:301,330` | `TradeAggregator` keeps trades in arrival order but prunes by exchange timestamp, stopping at the first unexpired trade. `snapshot()` prunes against the local clock. If venue latency differs, stale trades can linger. If the local clock skews by more than 60s, agg_delta empties or freezes. | Code reading |
 | D10 | Low | Design concern | `app.py:271` | Kalshi is polled on every rerun (12/min per tab at a 5s refresh), and an HTTP 429 has been seen before. A `st.cache_data(ttl=…)` around `current_btc15m_market` would cap this. | Code reading |
@@ -139,10 +140,10 @@ commit was checked in a clean worktree with the full suite.
 ## Re-running the evidence
 
 ```bash
-python -m pytest -q                                              # 459 passed
+python -m pytest -q                                              # 466 passed
 python review/settlement_averaging.py                            # B3 / D4: point vs averaged vs Monte Carlo
 python review/backtest_overlap.py 80                             # D2 / D3: n_eff and noise gate (~4 min)
-python review/demo_csv_race.py                                   # D7 (still open)
+python review/csv_writer_race.py                                 # D7: unlocked vs append_row, 8 writers
 ```
 
 D1 and D6 are now ordinary tests in `tests/test_app.py` and `tests/test_log_schema.py`.

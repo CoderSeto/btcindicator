@@ -95,10 +95,11 @@ such, not slipped in quietly.
 **Interfaces**
 - `main.py` -- console loop. Also owns `log_alert()` and
   `log_signal_snapshot()`, the `ALL_SIGNAL_NAMES` / `BOOK_LOG_FIELDS`
-  fixed-schema constants both use, and `_needs_header()` (now `csv_utils.needs_header`, shared with
-  `kalshi_tracking.log_prediction`), which rotates a
-  log aside when its column layout changes between releases (see gotcha
-  #1 below). Both loggers skip a row that repeats the file's last one
+  fixed-schema constants both use. Every log -- these two and
+  `kalshi_tracking.log_prediction` -- writes through
+  `csv_utils.append_row()`, which rotates a log aside when its column
+  layout changes between releases (gotcha #1) and does the whole append
+  under a cross-process file lock (gotcha #16). Both loggers skip a row that repeats the file's last one
   within `LOG_MIN_INTERVAL_SECONDS` (a different alert is always written),
   because the dashboard reruns on every tick, click and tab.
 - `dashboard_data.py` -- `load_state()`, the fetch+compute pipeline the
@@ -189,7 +190,7 @@ such, not slipped in quietly.
 
    Same corruption, second route: **adding a column in a new release**
    appends wider rows to a file already written under the narrower
-   header. `_needs_header()` handles that now -- if the on-disk header
+   header. `csv_utils.needs_header()` handles that now -- if the on-disk header
    doesn't match the expected one, the old file is renamed to
    `<path>.<timestamp>.bak` and a fresh one is started, so both files
    stay internally consistent and readable. Never just append.
@@ -326,6 +327,18 @@ such, not slipped in quietly.
     for any sample-size judgement, and measure edge against its
     `base_rate`, never against 0.5.
 
+16. **Two writers on one log corrupt it unless the append is locked.** The
+    dashboard, the console bot and every open tab write the same CSVs.
+    Unlocked, "check the header, then append" let 8 simultaneous writers
+    put 7-8 header lines in a new file (numeric columns then read back as
+    strings), let a writer read a half-written header and rotate a good
+    file aside, and on a layout change crashed the rename losers and lost
+    their rows. `csv_utils.append_row()` holds `<log>.lock` (O_CREAT |
+    O_EXCL, stdlib-only so it works on Windows) across the header check,
+    rotation, duplicate check and write. Never open a log for append
+    anywhere else. `review/csv_writer_race.py` shows before and after;
+    `tests/test_csv_utils.py` stress-tests it with separate processes.
+
 ## Testing approach
 
 There **is** now a committed suite, in `tests/`, run with `pytest` (add
@@ -431,4 +444,6 @@ python kalshi_tracking.py         # needs LOG_KALSHI_PREDICTIONS=True first
 automatically by the scripts above on first use. Plus
 `*.csv.<timestamp>.bak`, written when a log's column layout changes
 between releases (gotcha #1) -- old data, still readable, safe to delete
-once you've pulled anything you want out of it.
+once you've pulled anything you want out of it. And `*.csv.lock`, which
+exists only for the milliseconds of an append; one left behind by a
+crashed writer is cleared automatically after 10s.

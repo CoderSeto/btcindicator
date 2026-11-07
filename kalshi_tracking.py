@@ -41,7 +41,6 @@ log can answer.
 
 Run standalone: python kalshi_tracking.py
 """
-import csv
 import json
 import os
 from datetime import datetime, timezone
@@ -49,7 +48,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 import kalshi_api
-from csv_utils import needs_header
+from csv_utils import append_row
 
 
 PREDICTION_LOG_HEADER = [
@@ -70,13 +69,9 @@ def log_prediction(cfg, ticker, strike, current_price, minutes_remaining, p_yes,
     """
     if not cfg.LOG_KALSHI_PREDICTIONS:
         return
-    # Rotates an older-layout file aside rather than appending wider rows to it.
-    write_header = needs_header(cfg.KALSHI_PREDICTIONS_LOG_PATH, PREDICTION_LOG_HEADER)
-    with open(cfg.KALSHI_PREDICTIONS_LOG_PATH, "a", newline="") as f:
-        writer = csv.writer(f)
-        if write_header:
-            writer.writerow(PREDICTION_LOG_HEADER)
-        writer.writerow([
+    # Locked, and rotates an older-layout file aside rather than appending
+    # wider rows to it (csv_utils.append_row).
+    append_row(cfg.KALSHI_PREDICTIONS_LOG_PATH, PREDICTION_LOG_HEADER, [
             datetime.now(timezone.utc).isoformat(),
             ticker or "",
             strike,
