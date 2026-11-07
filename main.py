@@ -12,6 +12,7 @@ import csv
 import os
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 import requests
 
@@ -80,23 +81,81 @@ def _book_log_values(snapshot: signals.SignalSnapshot) -> list:
 _needs_header = needs_header
 
 
+def _now() -> datetime:
+    """The logs' clock (a function so tests can move it)."""
+    return datetime.now(timezone.utc)
+
+
+def _last_row(path: str, header: list) -> Optional[dict]:
+    """
+    The last data row of a log as {column: text}, or None if there isn't one
+    (missing file, header only, or a last line that doesn't fit the header).
+    Reads only the file's tail, so it stays cheap however long the log gets.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 16_384))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    lines = [line for line in tail.splitlines() if line.strip()]
+    if not lines:
+        return None
+    values = next(csv.reader([lines[-1]]))
+    if values == header or len(values) != len(header):
+        return None
+    return dict(zip(header, values))
+
+
+def _is_repeat(path: str, header: list, row: list, same_fields=()) -> bool:
+    """
+    True if the log's last row is less than LOG_MIN_INTERVAL_SECONDS old and
+    matches `row` on every field in `same_fields` -- i.e. this would be the
+    same observation logged again by another rerun, tab or process.
+    """
+    if cfg.LOG_MIN_INTERVAL_SECONDS <= 0:
+        return False
+    last = _last_row(path, header)
+    if last is None:
+        return False
+    try:
+        age = (_now() - datetime.fromisoformat(last["timestamp"])).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not 0 <= age < cfg.LOG_MIN_INTERVAL_SECONDS:
+        return False
+    new = dict(zip(header, row))
+    return all(last[f] == str(new[f]) for f in same_fields)
+
+
 def log_alert(snapshot: signals.SignalSnapshot):
+    """
+    Appends one alert row -- unless the log's last row is the same alert
+    (direction and strength) from less than LOG_MIN_INTERVAL_SECONDS ago,
+    which is a rerun or another tab/process seeing the same thing.
+    """
     needs_header = _needs_header(cfg.ALERT_LOG_PATH, ALERT_LOG_HEADER)
+    row = (
+        [
+            _now().isoformat(),
+            snapshot.price,
+            snapshot.composite,
+            snapshot.strength,
+            round(snapshot.imbalance, 3) if snapshot.imbalance is not None else "",
+        ]
+        + _book_log_values(snapshot)
+        + [snapshot.individual.get(name, "") for name in ALL_SIGNAL_NAMES]
+    )
+    if not needs_header and _is_repeat(cfg.ALERT_LOG_PATH, ALERT_LOG_HEADER, row,
+                                       same_fields=("composite", "strength")):
+        return
     with open(cfg.ALERT_LOG_PATH, "a", newline="") as f:
         writer = csv.writer(f)
         if needs_header:
             writer.writerow(ALERT_LOG_HEADER)
-        writer.writerow(
-            [
-                datetime.now(timezone.utc).isoformat(),
-                snapshot.price,
-                snapshot.composite,
-                snapshot.strength,
-                round(snapshot.imbalance, 3) if snapshot.imbalance is not None else "",
-            ]
-            + _book_log_values(snapshot)
-            + [snapshot.individual.get(name, "") for name in ALL_SIGNAL_NAMES]
-        )
+        writer.writerow(row)
 
 
 def log_signal_snapshot(snapshot: signals.SignalSnapshot):
@@ -107,20 +166,24 @@ def log_signal_snapshot(snapshot: signals.SignalSnapshot):
     continuously-growing file). Used by analyze_correlation.py.
     Any indicator missing from this cycle's snapshot (most commonly
     agg_delta or book_flow, before the feeds have warmed up) is logged as
-    an empty cell.
+    an empty cell. At most one row per LOG_MIN_INTERVAL_SECONDS, so the row
+    count measures observations rather than dashboard reruns.
     """
     if not cfg.LOG_ALL_SIGNALS:
         return
     needs_header = _needs_header(cfg.SIGNAL_LOG_PATH, SIGNAL_LOG_HEADER)
+    row = (
+        [_now().isoformat(), snapshot.price]
+        + _book_log_values(snapshot)
+        + [snapshot.individual.get(name, "") for name in ALL_SIGNAL_NAMES]
+    )
+    if not needs_header and _is_repeat(cfg.SIGNAL_LOG_PATH, SIGNAL_LOG_HEADER, row):
+        return
     with open(cfg.SIGNAL_LOG_PATH, "a", newline="") as f:
         writer = csv.writer(f)
         if needs_header:
             writer.writerow(SIGNAL_LOG_HEADER)
-        writer.writerow(
-            [datetime.now(timezone.utc).isoformat(), snapshot.price]
-            + _book_log_values(snapshot)
-            + [snapshot.individual.get(name, "") for name in ALL_SIGNAL_NAMES]
-        )
+        writer.writerow(row)
 
 
 _ABBR = {"bullish": "BULL", "bearish": "BEAR", "neutral": "NEUT"}

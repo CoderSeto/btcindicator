@@ -157,6 +157,14 @@ BACKTEST_RESULTS_PATH = "backtest_results.json"
 # CSV file alerts get appended to
 ALERT_LOG_PATH = "alerts_log.csv"
 
+# Minimum seconds between two rows in the alert and signal logs. The dashboard
+# reruns its whole script on every refresh tick, every widget click and in
+# every open tab, and the console bot writes the same files; without this each
+# rerun appended a row. A *different* alert (direction or strength changed) is
+# always logged straight away; only repeats are held back. Checked against the
+# file's own last row, so it also holds across processes. 0 disables it.
+LOG_MIN_INTERVAL_SECONDS = 20
+
 # --- Multi-exchange live feeds (aggregated volume, whale trades, liquidations) ---
 # Master switch -- set False to run on Coinbase REST data alone, no background
 # WebSocket connections.

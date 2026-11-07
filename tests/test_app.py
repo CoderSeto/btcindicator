@@ -461,6 +461,17 @@ def test_one_session_does_not_change_another_sessions_defaults(env):
     assert a.sidebar.selectbox[0].value == "ETH-USD"                      # A keeps its own choice
 
 
+def test_reruns_from_clicks_do_not_duplicate_log_rows(env):
+    # Every rerun -- a click, a refresh tick, another tab -- used to append to both logs.
+    cfg.LOG_ALL_SIGNALS = True
+    cfg.COMPOSITE_ALERT_THRESHOLD = 1
+    at = run()
+    at.sidebar.button[0].click().run()                                     # "Refresh now"
+    at.checkbox(key="kalshi_auto_track").uncheck().run()
+    assert len(pd.read_csv(cfg.SIGNAL_LOG_PATH)) == 1
+    assert len(pd.read_csv(cfg.ALERT_LOG_PATH)) == 1
+
+
 # ---------- backtest sidebar ----------
 
 def sidebar_text(at):
