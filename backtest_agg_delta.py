@@ -98,6 +98,11 @@ def reconstruct_agg_delta_series(trades: list, candle_times: list, window_second
                 sell -= notional
             left += 1
 
+        if left == right:
+            # Empty window: reset exactly, so floating-point residue from the
+            # incremental add/subtract can't pose as a tiny nonzero reading.
+            buy = sell = 0.0
+
         total = buy + sell
         delta_ratio = (buy - sell) / total if total > 0 else None
         results.append({"delta_ratio": delta_ratio, "total_notional": total})

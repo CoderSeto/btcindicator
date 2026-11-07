@@ -297,9 +297,18 @@ and is what any new tests should match:
   wall detection is asserted to use the median rather than the mean, via a
   wall large enough to hide itself under a mean.
 
-Still uncovered, in rough priority order if you're adding more:
-`kalshi.py`, `weighting.py`, `backtest_agg_delta.py`'s
-`reconstruct_agg_delta_series`, and `kalshi_tracking.py`'s logging.
+Also covered now: `kalshi.py`, `weighting.py`, `backtest_agg_delta.py` and
+`kalshi_tracking.py`. Writing them turned up three real bugs, all fixed:
+`compute_calibration` borrowed an older row's Kalshi quote (`groupby().first()`
+is per-column) and crashed when only some contracts had quotes, and
+`reconstruct_agg_delta_series` let float residue pose as a reading in an empty
+window.
+
+Still uncovered: `backtest.py`, `indicators.py`, `divergence.py`,
+`outlook.py`, `kalshi_api.py` and the Streamlit layer. `log_prediction()` in
+`kalshi_tracking.py` also lacks the `_needs_header()` rotation that `main.py`'s
+logs have (gotcha #1), so a future column change would append wider rows to an
+old file.
 
 ## Common commands
 

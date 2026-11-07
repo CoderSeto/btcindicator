@@ -135,7 +135,10 @@ def compute_calibration(df: pd.DataFrame, outcomes: dict, bucket_size: float, mi
                 "model_brier": None, "kalshi_brier": None, "n_resolved": 0}
 
     df = df[df["ticker"].astype(str).str.len() > 0].copy()
-    df = df.sort_values("minutes_remaining").groupby("ticker", as_index=False).first()
+    # drop_duplicates keeps one whole row per ticker. (groupby().first() would
+    # take the first non-null value per *column*, so a closest-to-close row with
+    # no Kalshi quote would silently borrow an older row's quote.)
+    df = df.sort_values("minutes_remaining", kind="stable").drop_duplicates("ticker", keep="first")
     df["outcome"] = df["ticker"].map(outcomes)
     df = df.dropna(subset=["outcome"])
 
@@ -154,7 +157,7 @@ def compute_calibration(df: pd.DataFrame, outcomes: dict, bucket_size: float, mi
             lo, hi = bounds[i], bounds[i + 1]
             is_last = i == n_buckets - 1
             mask = (series >= lo) & ((series <= hi) if is_last else (series < hi))
-            sub = df[mask]
+            sub = df.loc[series[mask].index]   # `series` may be a subset of df (rows with quotes)
             n = len(sub)
             observed = sub["actual"].mean() if n > 0 else None
             rows.append({
