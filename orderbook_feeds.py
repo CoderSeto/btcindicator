@@ -68,6 +68,8 @@ websocket.setdefaulttimeout(15)
 
 _BINANCE_US_REST_BASE = "https://api.binance.us"
 _BINANCE_SNAPSHOT_LIMIT = 5000
+# After a failed book sync, wait this long before the stream may trigger another.
+_BINANCE_RESYNC_COOLDOWN_SECONDS = 10.0
 
 
 # --- Message parsers ------------------------------------------------------
@@ -754,8 +756,33 @@ def _binance_book_runner(agg: BookAggregator, symbol: str, stop_event: threading
     url = f"wss://stream.binance.us:9443/ws/{symbol.lower()}@depth@100ms"
 
     def create_app():
-        state = {"buffer": [], "syncing": False}
+        # `syncing` is True from the moment a resync starts until the buffer it
+        # collected has been fully replayed onto the new book. While it's True,
+        # every stream event goes into the buffer -- never straight onto the book
+        # -- so events reach the book in stream order even while the snapshot is
+        # being installed. `retry_after` spaces out attempts after a failed sync.
+        state = {"buffer": [], "syncing": False, "retry_after": 0.0}
         state_lock = threading.Lock()
+
+        def drain(consumed: int) -> bool:
+            """
+            Replays buffered events past `consumed` until the buffer is empty,
+            then hands the stream back to on_message by clearing `syncing` --
+            under the same lock on_message checks, so no event can fall between
+            the last replayed one and the first applied live. Returns False if
+            the replay hit a gap (the book has been discarded).
+            """
+            while True:
+                with state_lock:
+                    extra = state["buffer"][consumed:]
+                    if not extra:
+                        state["buffer"] = []
+                        state["syncing"] = False
+                        return True
+                    consumed += len(extra)
+                for event in extra:
+                    if agg.apply_sequenced_update(name, event) == "gap":
+                        return False
 
         def resync():
             """Fetch a REST snapshot and splice the buffered events onto it."""
@@ -795,23 +822,9 @@ def _binance_book_runner(agg: BookAggregator, symbol: str, stop_event: threading
                         time.sleep(1.0)
                         continue
 
-                    if agg.seed_sequenced_book(name, snap.get("bids"), snap.get("asks"),
-                                               last_update_id, buffered):
-                        # Events that landed while the snapshot was being
-                        # applied are still sitting in the buffer. Drain
-                        # them before clearing it -- dropping even one
-                        # would leave a sequence hole and immediately
-                        # trigger another resync.
-                        while True:
-                            with state_lock:
-                                extra = state["buffer"][consumed:]
-                                if not extra:
-                                    state["buffer"] = []
-                                    state["syncing"] = False
-                                    break
-                                consumed += len(extra)
-                            for event in extra:
-                                agg.apply_sequenced_update(name, event)
+                    if (agg.seed_sequenced_book(name, snap.get("bids"), snap.get("asks"),
+                                                last_update_id, buffered)
+                            and drain(consumed)):
                         agg.set_status(name, "connected")
                         return
                     time.sleep(1.0)
@@ -819,10 +832,16 @@ def _binance_book_runner(agg: BookAggregator, symbol: str, stop_event: threading
                 agg.set_status(name, "error: could not sync book")
             except Exception as e:
                 agg.set_status(name, f"error: {e}")
-                agg.reset_book(name)
             finally:
                 with state_lock:
-                    state["syncing"] = False
+                    if state["syncing"]:
+                        # Didn't finish: leave nothing half-built, and hold off
+                        # before the next attempt rather than hammering the
+                        # REST endpoint (a 5000-level depth request is heavy).
+                        agg.reset_book(name)
+                        state["buffer"] = []
+                        state["syncing"] = False
+                        state["retry_after"] = time.time() + _BINANCE_RESYNC_COOLDOWN_SECONDS
 
         def start_resync():
             threading.Thread(target=resync, daemon=True).start()
@@ -840,18 +859,22 @@ def _binance_book_runner(agg: BookAggregator, symbol: str, stop_event: threading
             if not event:
                 return
 
+            with state_lock:
+                if state["syncing"]:
+                    # A sync is in flight: hold the event so it's replayed in
+                    # order once the snapshot lands.
+                    state["buffer"].append(event)
+                    return
+                retry_after = state["retry_after"]
+
             result = agg.apply_sequenced_update(name, event)
             if result in ("applied", "stale"):
                 return
-            if result == "not_seeded":
-                # Still waiting on the REST snapshot -- hold the event so
-                # it can be replayed once the snapshot lands.
-                with state_lock:
-                    if state["syncing"]:
-                        state["buffer"].append(event)
-                return
-            # "gap": the book was discarded, rebuild it from a fresh snapshot.
-            start_resync()
+            # "gap": the book was discarded. "not_seeded": an earlier sync failed
+            # and nothing else would ever retry it -- without this the venue
+            # stayed dark until the socket happened to reconnect.
+            if result == "gap" or time.time() >= retry_after:
+                start_resync()
 
         def on_error(ws, error):
             agg.set_status(name, f"error: {error}")

@@ -566,3 +566,101 @@ def test_flow_is_unavailable_when_no_venue_spans_the_window(monkeypatch):
     flow = agg.snapshot()["flow"]
     assert flow["available"] is False
     assert "venue" in flow["reason"]
+
+
+class _BinanceHarness:
+    """
+    Drives _binance_book_runner's real callbacks with no socket and no threads: the WebSocketApp is
+    a recorder, background threads run inline, sleeps are skipped and the clock is fake. `snapshots`
+    is the queue of REST /depth responses (an Exception instance is raised instead).
+    """
+
+    def __init__(self, monkeypatch, snapshots):
+        self.clock = _clocked(monkeypatch)
+        self.snapshots = list(snapshots)
+        self.rest_calls = 0
+        self.apps = []
+        harness = self
+
+        class FakeApp:
+            def __init__(self, url, on_open, on_message, on_error, on_close):
+                self.on_open, self.on_message = on_open, on_message
+                harness.apps.append(self)
+
+        class InlineThread:
+            def __init__(self, target, args=(), daemon=None):
+                self.target, self.args = target, args
+
+            def start(self):
+                self.target(*self.args)
+
+        def get(url, params=None, timeout=None):
+            harness.rest_calls += 1
+            item = harness.snapshots.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: item)
+
+        monkeypatch.setattr(obf.websocket, "WebSocketApp", FakeApp)
+        monkeypatch.setattr(obf, "threading", SimpleNamespace(
+            Thread=InlineThread, Lock=threading.Lock, Event=threading.Event))
+        monkeypatch.setattr(obf, "requests", SimpleNamespace(get=get))
+        monkeypatch.setattr(obf, "run_with_reconnect",
+                            lambda name, create, stop, sink, holder: holder.setdefault("app", create()))
+        self.agg = obf.BookAggregator(_Cfg)
+        obf._binance_book_runner(self.agg, "BTCUSDT", threading.Event(), {})
+        self.app = self.apps[0]
+
+    def event(self, first_id, last_id, bids=None, asks=None):
+        self.app.on_message(self.app, json.dumps({
+            "e": "depthUpdate", "E": 0, "s": "BTCUSDT", "U": first_id, "u": last_id,
+            "b": bids or [], "a": asks or []}))
+
+
+def _depth(last_update_id):
+    return {"lastUpdateId": last_update_id, "bids": [["99999", "1"]], "asks": [["100001", "1"]]}
+
+
+def test_binance_recovers_after_a_failed_snapshot_fetch(monkeypatch):
+    """
+    One REST error while syncing used to be terminal: the book was left unseeded, `syncing` was
+    cleared, and on_message only ever re-synced on a *gap* -- never on "not_seeded" -- so Binance
+    dropped out of the aggregate until the socket itself happened to reconnect (up to 24h).
+    """
+    h = _BinanceHarness(monkeypatch, [ConnectionError("boom"), _depth(100)])
+    h.app.on_open(h.app)
+    assert h.rest_calls == 1 and not h.agg.is_ready("binance_us")
+
+    h.event(101, 101)                                                        # straight after: cool down,
+    assert h.rest_calls == 1                                                 # don't hammer the REST API
+
+    h.clock["t"] += 60.0
+    h.event(102, 102)
+    assert h.rest_calls == 2
+    assert h.agg.is_ready("binance_us")
+    assert h.agg._status["binance_us"] == "connected"
+
+
+def test_binance_events_arriving_while_the_snapshot_is_applied_are_replayed_in_order(monkeypatch):
+    """
+    The live stream kept applying events directly as soon as the snapshot was installed, while
+    events that had landed during the install were still waiting in the buffer. The first live
+    event then looked like a gap, the book was thrown away, the in-flight resync swallowed the
+    retry, and the status still ended up "connected" over an empty book.
+    """
+    h = _BinanceHarness(monkeypatch, [_depth(100)])
+    real_seed = h.agg.seed_sequenced_book
+
+    def seed_with_traffic(*args, **kwargs):
+        h.event(101, 101, bids=[["99998", "2"]])                             # lands mid-install
+        ok = real_seed(*args, **kwargs)
+        h.event(102, 102, asks=[["100002", "3"]])                            # stream carries on
+        return ok
+
+    h.agg.seed_sequenced_book = seed_with_traffic
+    h.app.on_open(h.app)
+
+    book = h.agg._books["binance_us"]
+    assert book.ready and book.update_id == 102
+    assert book.bids[99998.0] == 2.0 and book.asks[100002.0] == 3.0
+    assert h.agg._status["binance_us"] == "connected"
