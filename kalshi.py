@@ -105,18 +105,14 @@ def crossing_probability(current_price: float, strike: float, minutes_remaining:
 
     Explicitly handles minutes_remaining <= 0 (avoids a division by zero):
     with no time left, the outcome is already decided by where price sits
-    relative to the strike right now.
+    relative to the strike right now. KXBTC15M is "greater_or_equal", so
+    finishing exactly on the strike is YES.
     """
     if current_price <= 0 or strike <= 0:
         raise ValueError("current_price and strike must be positive")
 
     if minutes_remaining <= 0:
-        if current_price > strike:
-            return 1.0
-        elif current_price < strike:
-            return 0.0
-        else:
-            return 0.5
+        return 1.0 if current_price >= strike else 0.0
 
     if annual_vol is None or annual_vol <= 0:
         raise ValueError("annual_vol must be a positive number")

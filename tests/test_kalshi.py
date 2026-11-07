@@ -91,7 +91,9 @@ def test_crossing_expired_is_decided_by_price():
     p = kalshi.crossing_probability
     assert p(101, 100, 0, 0.5) == 1.0
     assert p(99, 100, -3, 0.5) == 0.0
-    assert p(100, 100, 0, 0.5) == 0.5
+    # KXBTC15M is strike_type "greater_or_equal" (tests/fixtures/kalshi_open_markets.json):
+    # finishing exactly on the strike settles YES, not a coin flip.
+    assert p(100, 100, 0, 0.5) == 1.0
     # vol is irrelevant (and may be None) once time is up.
     assert p(101, 100, 0, None) == 1.0
 
