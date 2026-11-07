@@ -261,6 +261,38 @@ such, not slipped in quietly.
    `py` launcher (`py`, `py -m pip`) reliably hits the one with this
    project's dependencies installed.
 
+10. **A hole in a sampled history is not evidence.** `BookAggregator` only
+    samples while some venue has a usable book, so an outage (or the
+    machine asleep) leaves a gap. Persistence and wall age used to walk
+    straight across it -- a lean seen before and after a 5-minute outage
+    "held" for 5 minutes and passed the vote gate on its first sample back.
+    Anything that measures "how long has X held" over a sampled series must
+    break the run at a gap (`_max_sample_gap()`), and must expire stale
+    state *before* refreshing it with the current sample.
+
+11. **A sum over "whichever venues are up" changes when a venue drops.**
+    Book flow compared the summed notional of the usable venues at each end
+    of its window, so one bid-heavy venue leaving the aggregate (a
+    disconnect, or the spread gate during volatility) read as bids being
+    pulled -- a fabricated -0.69 flow vote. Compare a quantity over time only
+    across the venues present at both ends (samples carry `venue_notional`
+    for this). Ratios averaged per venue (gotcha #7) don't have this problem;
+    raw totals do.
+
+12. **A key derived from a value scaled by itself is a constant.** Wall
+    tracking matched walls with `round(price / (price * bps / 1e4))`, which
+    is `round(1e4 / bps)` for every price: all walls on a side shared one
+    key, and a new wall inherited an old one's age -- defeating the spoof
+    filter that wall age exists for. Bucket in log price instead.
+
+13. **Kalshi's 60-second settlement average makes the true probability
+    MORE extreme than the point-in-time model, not less.** The caveat was
+    written backwards in four places (docstring, README, CLI, dashboard).
+    Averaging lowers the terminal variance (~sigma^2 * (T - 2/3 min)), so
+    the model is too close to 50%: ~79% vs ~92% at 1 minute left, spot 5bp
+    above the strike. Pinned against a Monte Carlo of the real rule in
+    `tests/test_kalshi.py`; `review/settlement_averaging.py` prints the table.
+
 ## Testing approach
 
 There **is** now a committed suite, in `tests/`, run with `pytest` (add
@@ -311,9 +343,20 @@ using Streamlit's `AppTest` (the real `app.py` runs; only Coinbase REST, the
 feed handles and Kalshi's API are stubbed, and the live-feed scenario drives a
 real `BookAggregator` on a fake clock). `app.py`'s `_esc` and
 `_strike_path_liquidity` are lifted out with `ast` since a script can't be
-imported. Not covered: the WebSocket runner threads in `exchange_feeds.py` /
-`orderbook_feeds.py` (only their parsers and aggregators are), and visual
-layout/CSS, which needs a browser.
+imported. Not covered: `exchange_feeds.py`'s trade/liquidation parsers and
+`TradeAggregator` (the aggregator is only used to build fixtures in
+`test_app.py`; nothing asserts on it), the Coinbase and Bybit runner callbacks,
+and visual layout/CSS, which needs a browser. The Binance.US depth runner's
+resync logic and `run_with_reconnect`'s backoff *are* covered, by driving the
+real callbacks with the socket, threads, sleeps and REST call faked
+(`_BinanceHarness` in `tests/test_orderbook_feeds.py`,
+`tests/test_exchange_feeds.py`) -- that harness is the pattern for the rest.
+
+`REVIEW_FINDINGS.md` holds the 2026-11-07 full review: what was fixed, what
+was left as a recommendation (shared `config` mutated across Streamlit
+sessions, backtest sample overlap, weighting against 0.5 rather than the base
+rate, and more), and the evidence for each. `review/` has the scripts behind
+the quantified claims.
 
 Streamlit renders `$...$` as LaTeX, so every string with dollar amounts that
 reaches `st.caption`/`st.markdown`/`st.warning` must go through `_esc()` --
