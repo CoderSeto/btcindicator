@@ -630,11 +630,10 @@ With "Auto-track current window" checked (the dashboard default):
   that gap is the actual "is there an edge here" question, though see the
   caveat below before reading too much into it.
 
-**Sanity-check it yourself first.** This was built against Kalshi's
-documented API schema with thorough mocked testing, but I can't reach
-`external-api.kalshi.com` from the environment this was built in, so it's
-never actually been verified against Kalshi's live API. Run
-`python kalshi_api.py` standalone once -- it should print a real ticker,
+**Sanity-check it yourself.** This was verified against Kalshi's live
+API on 2026-11-07, and the tests run on real captured payloads, but
+Kalshi can change things. Run
+`python kalshi_api.py` standalone any time -- it should print a real ticker,
 a strike near the current BTC price, and a close time within the next 15
 minutes. If something looks off (particularly if `SERIES_TICKER` in the
 file, currently `"KXBTC15M"`, ever needs to change -- Kalshi does

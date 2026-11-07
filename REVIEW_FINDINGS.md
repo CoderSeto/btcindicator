@@ -125,7 +125,7 @@ commit was checked in a clean worktree with the full suite.
 
 | # | Verdict |
 |---|---------|
-| 1 | **Still unresolved.** The proxy refuses both `external-api.kalshi.com` and Coinbase with 403, and local DNS resolves only allowlisted hosts, so this sandbox can't tell whether the host exists. `api.elections.kalshi.com` answered live on 2026-11-07 with 1 open KXBTC15M market in the fixture schema. **Recommendation:** switch `BASE_URL` to `api.elections.kalshi.com` unless a live check outside this sandbox shows `external-api` works. Run `python kalshi_api.py` once from your machine. |
+| 1 | **Resolved: `BASE_URL` is correct, no change.** The sandbox's proxy refused `external-api.kalshi.com`, so it couldn't be checked here. On 2026-11-07 the user ran `py kalshi_api.py` from their own machine against `external-api.kalshi.com`. It returned the open market `KXBTC15M-26NOV071830-30`: strike $75,662.60, close 23:30 UTC (18:30 ET, matching the ticker), 7.9 min left, YES $0.32/$0.33, last $0.33. `api.elections.kalshi.com`, where the fixtures were captured, serves the same schema and stays a working fallback. |
 | 2 | **Fixed** (`afb98a5`). `signals.py` now reads `sma_{SMA_FAST}` etc., and the dead crossover branches are gone. Covered by `test_signals_price.py::test_the_cross_votes_follow_the_configured_periods`. |
 | 3 | **Still true. Defensible choice, but undocumented in the output.** Cutler's RSI (simple mean) is a legitimate variant, but it doesn't match the Wilder RSI on most charting sites, so the 30/70 thresholds behave differently. All-gains reporting **50** is a **latent bug**: a one-way run is the most overbought case and reads as neutral. It needs ≥14 consecutive up-closes on 1-min candles, so it's rare. Recommend `rsi = 100` when `avg_loss == 0 and avg_gain > 0`. |
 | 4 | **Still true. Defensible**, but it understates spikes: the current candle inflates its own baseline by ~1/20 of its excess. Combined with D5, the live volume vote fires less often than the backtest assumes. |
@@ -136,7 +136,8 @@ commit was checked in a clean worktree with the full suite.
 ## What I could not verify
 
 - **Live endpoints.** Coinbase (REST and WebSocket), Binance.US, Bybit and `external-api.kalshi.com`
-  all return 403 from the proxy. Only `api.elections.kalshi.com` was reachable. Every exchange
+  all return 403 from the proxy. Only `api.elections.kalshi.com` was reachable. (`external-api` has
+  since been confirmed live from the user's machine; see known item 1.) Every exchange
   claim here comes from code reading or a mocked test, not observed live behaviour.
 - **D5.** Whether Coinbase's newest candle is still forming.
 - **Binance procedure.** Whether Binance.US's live diff-depth stream matches the documented procedure

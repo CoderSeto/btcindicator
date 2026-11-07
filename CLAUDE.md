@@ -448,9 +448,10 @@ now pinned by a test.
 `tests/test_kalshi_api.py` runs against verbatim Kalshi payloads saved in
 `tests/fixtures/` (captured 2026-11-07; the capture URLs are in the test's
 docstring -- re-capture if Kalshi changes its schema). Host note: the tests
-mock the network, and `kalshi_api.BASE_URL` is `external-api.kalshi.com`, but
-the payloads were captured from `api.elections.kalshi.com`, the host that
-answered from the sandbox. Verify BASE_URL against Kalshi's current docs.
+mock the network. `kalshi_api.BASE_URL` is `external-api.kalshi.com`, confirmed
+live from the user's machine on 2026-11-07. The payloads were captured from
+`api.elections.kalshi.com`, which serves the same schema. Cloud sandboxes may
+reach neither: their proxy has refused both hosts.
 
 `signals.py` reads the moving-average columns under the names config implies
 (`sma_{SMA_FAST}` ...), the same way `indicators.py` builds them, so changing

@@ -12,10 +12,10 @@ Confirmed via Kalshi's official API docs (docs.kalshi.com):
     directional BTC series -- easy to mix up (some sources conflate the
     two), confirmed distinct by cross-checking multiple sources.
 
-I can't test this against Kalshi's live API myself (external-api.kalshi.com
-isn't reachable from the sandbox this was built in), so this is built
-carefully against the documented response schema with mocked tests -- it
-needs a live sanity check. Run standalone to do that:
+Verified live against external-api.kalshi.com on 2026-11-07, from the user's
+machine (the build sandbox can't reach it): it returned the open market with a
+real strike, close time and quote. The tests run on verbatim payloads in
+tests/fixtures/. Re-run the live check any time:
 
     python kalshi_api.py
 """
