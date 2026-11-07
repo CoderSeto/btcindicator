@@ -137,6 +137,10 @@ def _scenario_trades(skip=(20,)):
     return [_tr(T0 + 60 * k - 30, "buy" if k % 3 == 0 else "sell") for k in range(N) if k not in skip]
 
 
+def _ht(bucket):
+    return {"hits": bucket["hits"], "total": bucket["total"]}
+
+
 @pytest.fixture
 def stubbed(monkeypatch, tmp_path):
     cfg = _cfg(tmp_path)
@@ -170,8 +174,8 @@ def test_end_to_end_hit_rates_at_every_datetime_resolution(stubbed, unit):
     #                  i=14 exact tie -> skipped,
     #                  i=20 no trade coverage -> skipped,
     #                  i=16,17,19,22,23,25,26 (future lower -> 7 hits)  => 7 / 15
-    assert res["indicator_buckets"]["agg_delta_bullish"] == {"hits": 4, "total": 9}
-    assert res["indicator_buckets"]["agg_delta_bearish"] == {"hits": 7, "total": 15}
+    assert _ht(res["indicator_buckets"]["agg_delta_bullish"]) == {"hits": 4, "total": 9}
+    assert _ht(res["indicator_buckets"]["agg_delta_bearish"]) == {"hits": 7, "total": 15}
 
     meta = res["agg_delta_backtest"]
     assert meta["source"] == "binance_us_only"
@@ -197,7 +201,7 @@ def test_end_to_end_merges_into_base_and_writes_file(stubbed, tmp_path):
     saved = json.loads((tmp_path / "backtest_results.json").read_text())
     assert saved["marker"] == 1
     assert saved["indicator_buckets"]["rsi_bullish"] == {"hits": 7, "total": 10}   # untouched
-    assert saved["indicator_buckets"]["agg_delta_bullish"] == {"hits": 4, "total": 9}
+    assert _ht(saved["indicator_buckets"]["agg_delta_bullish"]) == {"hits": 4, "total": 9}
 
 
 def test_end_to_end_omits_bucket_with_no_directional_calls(stubbed):
@@ -255,3 +259,20 @@ def test_sanity_check_catches_implausible_timestamps(stubbed, tmp_path):
     res = bad.run_agg_delta_backtest(cfg)
     assert "implausible end time" in res["error"]
     assert not (tmp_path / "backtest_results.json").exists()
+
+
+
+def test_agg_delta_buckets_carry_their_own_base_rate_and_n_eff(stubbed):
+    # Scored candles (covered, not tied), i = 2..27 minus 14 (tie) and 20 (no coverage) = 24:
+    # up at i = 2..13 (12), down at 15..27 minus 20 (12) -> base rate 0.5 each way, measured over
+    # this backtest's own window rather than borrowed from the candle backtest's.
+    cfg, state = stubbed
+    res = bad.run_agg_delta_backtest(cfg)
+    bull = res["indicator_buckets"]["agg_delta_bullish"]
+    assert bull["base_rate"] == pytest.approx(0.5)
+    assert res["agg_delta_backtest"]["base_rates"] == {"bullish": 0.5, "bearish": 0.5, "total": 24}
+    # Bullish calls sit 3 candles apart, lookahead is 2: no overlap, n_eff == n.
+    assert bull["n_eff"] == 9
+    # Bearish calls include runs of adjacent candles (4,5 / 7,8 / ...): overlapping windows.
+    bear = res["indicator_buckets"]["agg_delta_bearish"]
+    assert bear["n_eff"] < bear["total"]

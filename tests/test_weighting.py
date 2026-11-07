@@ -7,8 +7,10 @@ import weighting
 
 
 def _cfg(**kw):
+    # MIN_Z=0 by default here: most tests below pin the weight *formula*; the noise gate has
+    # its own tests at the bottom.
     base = dict(BACKTEST_MIN_SAMPLE=15, INDICATOR_WEIGHT_SCALE=2.0,
-                INDICATOR_WEIGHT_MIN=0.2, INDICATOR_WEIGHT_MAX=2.0)
+                INDICATOR_WEIGHT_MIN=0.2, INDICATOR_WEIGHT_MAX=2.0, INDICATOR_WEIGHT_MIN_Z=0.0)
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -122,3 +124,55 @@ def test_conviction_pct_always_in_half_to_one():
         out = weighting.weighted_conviction(snap, WEIGHTS)
         if out["available"]:
             assert 0.5 <= out["weighted_pct"] <= 1.0
+
+
+
+# ---------- edge vs the base rate, on the effective sample (REVIEW_FINDINGS D3) ----------
+
+def test_edge_is_measured_against_the_base_rate_not_a_coin_flip():
+    # In a window where 60% of 5-candle moves were up, a bullish call that's right 60% of the time
+    # has no skill -- "always bullish" would score the same.
+    b = {"hits": 600, "total": 1000, "n_eff": 1000, "base_rate": 0.60}
+    assert weighting._weight_from_bucket(b, _cfg()) == pytest.approx(1.0)
+    b = {"hits": 700, "total": 1000, "n_eff": 1000, "base_rate": 0.60}
+    assert weighting._weight_from_bucket(b, _cfg()) == pytest.approx(1.2)  # 1 + 2 * (0.70 - 0.60)
+
+
+def test_min_sample_applies_to_the_effective_sample():
+    b = {"hits": 900, "total": 1000, "n_eff": 14.0, "base_rate": 0.5}
+    assert weighting._weight_from_bucket(b, _cfg()) == 1.0                 # 1000 rows, 14 independent
+
+
+def test_an_edge_within_noise_keeps_weight_one():
+    # z = edge / sqrt(base*(1-base)/n_eff). 55% vs 50% on n_eff=100: se 0.05, z=1.0 -> noise.
+    cfg = _cfg(INDICATOR_WEIGHT_MIN_Z=2.0)
+    assert weighting._weight_from_bucket(
+        {"hits": 550, "total": 1000, "n_eff": 100, "base_rate": 0.5}, cfg) == 1.0
+    # Same rate on n_eff=900: se 0.0167, z=3.0 -> weighted, 1 + 2*0.05.
+    assert weighting._weight_from_bucket(
+        {"hits": 550, "total": 1000, "n_eff": 900, "base_rate": 0.5}, cfg) == pytest.approx(1.1)
+
+
+def test_weight_details_say_why_a_weight_is_one():
+    cfg = _cfg(INDICATOR_WEIGHT_MIN_Z=2.0)
+    d = weighting.weight_details({"hits": 550, "total": 1000, "n_eff": 100, "base_rate": 0.5}, cfg)
+    assert d["weight"] == 1.0 and d["reason"] == "within_noise"
+    assert d["edge"] == pytest.approx(0.05) and d["z"] == pytest.approx(1.0)
+    assert weighting.weight_details(None, cfg)["reason"] == "no_data"
+    assert weighting.weight_details({"hits": 9, "total": 10}, cfg)["reason"] == "small_sample"
+    assert weighting.weight_details(
+        {"hits": 700, "total": 1000, "n_eff": 900, "base_rate": 0.5}, cfg)["reason"] == "measured"
+
+
+def test_compute_weight_details_matches_compute_weights():
+    cfg = _cfg(INDICATOR_WEIGHT_MIN_Z=2.0)
+    results = {"indicator_buckets": {
+        "rsi_bullish": {"hits": 700, "total": 1000, "n_eff": 900, "base_rate": 0.5},
+        "rsi_bearish": {"hits": 510, "total": 1000, "n_eff": 300, "base_rate": 0.5},
+    }}
+    details = weighting.compute_weight_details(results, cfg)
+    weights = weighting.compute_weights(results, cfg)
+    assert details["rsi"]["bullish"]["reason"] == "measured"
+    assert details["rsi"]["bearish"]["reason"] == "within_noise"
+    assert details["macd"]["bullish"]["reason"] == "no_data"
+    assert {n: {d: v["weight"] for d, v in dirs.items()} for n, dirs in details.items()} == weights

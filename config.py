@@ -185,11 +185,17 @@ LIQUIDATION_LIST_MAXLEN = 50
 # Turns each indicator's backtested hit rate into a weight for a SEPARATE
 # "weighted conviction" score, alongside (not replacing) the raw indicator
 # count used for the composite/alert threshold. Weight = 1.0 + SCALE *
-# (hit_rate - 0.5): a coin-flip (50%) indicator gets weight 1.0 (same as
-# unweighted); above/below 50% scales up/down from there.
+# (hit_rate - base_rate): a call that does no better than the window's own
+# drift gets weight 1.0 (same as unweighted); better/worse scales up/down.
 INDICATOR_WEIGHT_SCALE = 2.0
 INDICATOR_WEIGHT_MIN = 0.2  # floor -- a bad-track-record indicator still counts a little
 INDICATOR_WEIGHT_MAX = 2.0  # cap -- one strong indicator can't fully dominate
+# The edge is measured against the backtested window's base rate for that
+# direction (not 50%), on the overlap-corrected effective sample size, and a
+# weight only moves off 1.0 when that edge is at least this many standard
+# errors from zero. Below it the edge is indistinguishable from sampling noise
+# -- on a pure random walk, ungated weights still spread +/-0.08 to +/-0.16.
+INDICATOR_WEIGHT_MIN_Z = 2.0
 
 # --- Signal logging (for correlation analysis -- see analyze_correlation.py) ---
 # When True, logs EVERY cycle's full set of indicator votes to

@@ -363,7 +363,21 @@ real historical BTC candles, replays the exact same signal and divergence
 logic at every point in that history, and checks what price actually did
 `BACKTEST_LOOKAHEAD_CANDLES` (5, by default) candles later. That gives an
 empirical hit rate for each signal pattern -- e.g. "this pattern has been
-followed by an upward move within 5 candles 63% of the time (n=140)."
+followed by an upward move within 5 candles 63% of the time, against a 51%
+base rate for any window (n=140, about 45 independent)."
+
+Two numbers sit next to every hit rate, because a hit rate alone overstates
+what it shows:
+
+- **The base rate** -- how often *any* window in the backtest moved that way.
+  In a stretch that drifted up, every bullish call looks good; a call is
+  only worth something to the extent it beats that.
+- **The effective sample size** ("about N independent"). Every candle is
+  scored against the next 5, so neighbouring rows share most of their
+  outcome window, and state votes like SMA cross fire on long runs of
+  consecutive candles. On simulated random walks the raw n overstated the
+  evidence ~3.5x for those signals. `backtest.effective_sample_size()`
+  corrects for the overlap.
 
 Run it two ways:
 
@@ -392,8 +406,8 @@ historical candles in paginated requests, so it takes 10-30 seconds).
 - **Small samples happen, and are labeled.** Some signal combinations are
   rare, especially at high alignment counts (5-6 of 6 indicators agreeing
   at once). Any hit rate built from fewer than `BACKTEST_MIN_SAMPLE`
-  occurrences (15, by default) is flagged "small sample -- treat with
-  caution" rather than presented with false confidence.
+  *effective* (independent) samples (15, by default) is flagged "small
+  sample -- treat with caution" rather than presented with false confidence.
 - **A hit rate is not a probability of the future.** It's a description of
   what happened in the specific historical window you backtested. Markets
   change regime; a pattern that worked in the last few days of data isn't
@@ -417,16 +431,25 @@ of the 6 backtestable indicators' bullish and bearish calls individually
 (not just the composite). `weighting.py` turns each one into a weight:
 
 ```
-weight = 1.0 + INDICATOR_WEIGHT_SCALE * (hit_rate - 0.5)
+weight = 1.0 + INDICATOR_WEIGHT_SCALE * (hit_rate - base_rate)
 ```
 
-A coin-flip indicator (50% hit rate) gets weight 1.0 -- same as
-unweighted. Above 50%, its weight scales up; below 50%, it scales down
-(floored at `INDICATOR_WEIGHT_MIN` rather than going to zero or negative,
-so a historically weak indicator still counts a little rather than
-vanishing from the story). Small samples fall back to 1.0 rather than
-trusting a noisy edge, using the same `BACKTEST_MIN_SAMPLE` threshold as
-everywhere else.
+`base_rate` is how often the backtested window moved in that direction at
+all, so an indicator that does no better than "always say bullish" gets
+weight 1.0 -- same as unweighted. Beating the base rate scales its weight
+up; trailing it scales it down (floored at `INDICATOR_WEIGHT_MIN` rather
+than going to zero or negative, so a historically weak indicator still
+counts a little rather than vanishing from the story).
+
+A weight stays at 1.0 unless the evidence is there: fewer than
+`BACKTEST_MIN_SAMPLE` effective samples, or an edge within
+`INDICATOR_WEIGHT_MIN_Z` (2) standard errors of zero, means "no measured
+edge". That second gate matters: on backtests of pure random walks,
+where no indicator can have an edge, ungated weights still spread
++/-0.08 to +/-0.16 from noise alone. The Notes tab's weights table says
+why each weight is what it is, and when nothing voting has a measured
+edge the outlook says weighting changes nothing rather than quoting a
+"weighted conviction" figure.
 
 The dashboard shows this as a line under the Outlook -- "weighted
 conviction is 72% bullish" -- with an expander showing exactly which

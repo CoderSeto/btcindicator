@@ -195,6 +195,11 @@ def scripted(monkeypatch, tmp_path):
     return cfg, seen, df
 
 
+def _ht(bucket):
+    """The hit/total part of a bucket (n_eff and base_rate are tested on their own below)."""
+    return {"hits": bucket["hits"], "total": bucket["total"]}
+
+
 def test_walk_forward_covers_exactly_warmup_to_end_minus_lookahead(scripted):
     cfg, seen, _ = scripted
     backtest.run_backtest(cfg)
@@ -207,13 +212,13 @@ def test_indicator_buckets_hand_computed(scripted):
     b = backtest.run_backtest(cfg)["indicator_buckets"]
     # actual: i<=13 bullish, i=14 tie (skipped), i>=15 bearish.
     # rsi bullish at even i: 10,12 hit; 16,18,20,22,24,26 miss              -> 2/8
-    assert b["rsi_bullish"] == {"hits": 2, "total": 8}
+    assert _ht(b["rsi_bullish"]) == {"hits": 2, "total": 8}
     # rsi bearish at odd i: 9,11,13 miss; 15,17,19,21,23,25,27 hit          -> 7/10
-    assert b["rsi_bearish"] == {"hits": 7, "total": 10}
+    assert _ht(b["rsi_bearish"]) == {"hits": 7, "total": 10}
     # macd bullish at i%3==0: 9,12 hit; 15,18,21,24,27 miss                 -> 2/7
-    assert b["macd_bullish"] == {"hits": 2, "total": 7}
+    assert _ht(b["macd_bullish"]) == {"hits": 2, "total": 7}
     # macd bearish at i%3==2: 11 miss; 14 tie skipped; 17,20,23,26 hit      -> 4/5
-    assert b["macd_bearish"] == {"hits": 4, "total": 5}
+    assert _ht(b["macd_bearish"]) == {"hits": 4, "total": 5}
     assert not any(k.startswith("macd_neutral") for k in b)       # neutral votes are not calls
 
 
@@ -221,8 +226,8 @@ def test_divergence_buckets_hand_computed(scripted):
     cfg, _, _ = scripted
     d = backtest.run_backtest(cfg)["divergence_buckets"]
     # bullish at i%5==0: 10 hit; 15,20,25 miss; bearish at i%5==1: 11 miss; 16,21,26 hit
-    assert d["bullish"] == {"hits": 1, "total": 4}
-    assert d["bearish"] == {"hits": 3, "total": 4}
+    assert _ht(d["bullish"]) == {"hits": 1, "total": 4}
+    assert _ht(d["bearish"]) == {"hits": 3, "total": 4}
 
 
 def test_strength_buckets_match_independent_tally(scripted):
@@ -236,7 +241,7 @@ def test_strength_buckets_match_independent_tally(scripted):
             continue
         h, t = want.get(f"{snap.composite}_{snap.strength}", (0, 0))
         want[f"{snap.composite}_{snap.strength}"] = (h + (actual == snap.composite), t + 1)
-    assert got == {k: {"hits": h, "total": t} for k, (h, t) in want.items()}
+    assert {k: _ht(v) for k, v in got.items()} == {k: {"hits": h, "total": t} for k, (h, t) in want.items()}
     # Spot-check: i=9 votes rsi bearish / macd bullish -> neutral composite, never bucketed.
     # 18 non-tie positions, minus the 6 where rsi and macd oppose (i=9,15,20,21,26,27) -> neutral
     assert sum(v["total"] for v in got.values()) == 12
@@ -390,11 +395,13 @@ def test_confidence_signal_rate_n_and_low_sample_flag():
     snap = _snap(a="bullish", b="bullish", c="bullish", d="bearish")
     out = backtest.get_confidence(RESULTS, snap, {"type": None}, 15)
     assert out["available"] and out["lookahead_candles"] == 5
-    assert out["signal"] == {"direction": "bullish", "rate": 0.75, "n": 40, "low_sample": False}
+    assert out["signal"] == {"direction": "bullish", "rate": 0.75, "n": 40, "n_eff": 40,
+                             "base_rate": None, "low_sample": False}
     assert "divergence" not in out
 
     low = backtest.get_confidence(RESULTS, _snap(a="bearish", b="bearish"), {}, 15)
-    assert low["signal"] == {"direction": "bearish", "rate": 0.3, "n": 10, "low_sample": True}
+    assert low["signal"] == {"direction": "bearish", "rate": 0.3, "n": 10, "n_eff": 10,
+                             "base_rate": None, "low_sample": True}
     # The flag flips exactly at min_sample.
     assert backtest.get_confidence(RESULTS, _snap(a="bearish", b="bearish"), {}, 10)["signal"]["low_sample"] is False
 
@@ -406,7 +413,72 @@ def test_confidence_neutral_or_unseen_state_has_no_signal_entry():
 
 def test_confidence_divergence_lookup():
     out = backtest.get_confidence(RESULTS, _snap(), {"type": "bullish"}, 15)
-    assert out["divergence"] == {"direction": "bullish", "rate": 0.6, "n": 10, "low_sample": True}
+    assert out["divergence"] == {"direction": "bullish", "rate": 0.6, "n": 10, "n_eff": 10,
+                                 "base_rate": None, "low_sample": True}
     # An empty (total=0) bucket is not reported, rather than dividing by zero.
     assert "divergence" not in backtest.get_confidence(RESULTS, _snap(), {"type": "bearish"}, 15)
     assert "divergence" not in backtest.get_confidence(RESULTS, _snap(), None, 15)
+
+
+
+# ---------- effective sample size and base rate (REVIEW_FINDINGS D2/D3) ----------
+#
+# The backtest scores every candle against the move over the next `lookahead` candles, so the
+# outcome windows of positions less than `lookahead` apart overlap and their hits are correlated.
+# Under a no-edge random walk, hits of positions >= lookahead apart are independent (disjoint
+# future returns), which is what makes a variance estimator truncated at lag lookahead-1 exact
+# under the null.
+
+def test_n_eff_is_n_when_no_two_outcome_windows_overlap():
+    pos = [0, 5, 10, 17, 30]
+    assert backtest.effective_sample_size(pos, [1, 0, 1, 1, 0], max_lag=5) == 5.0
+
+
+def test_n_eff_hand_computed_for_duplicated_observations():
+    # Two independent observations, each seen twice in a row: p=0.5, x=[.5,.5,-.5,-.5].
+    # sum x^2 = 1; overlapping pairs (0,1) and (10,11) add 2*.25 each -> 2; design effect 2.
+    assert backtest.effective_sample_size([0, 1, 10, 11], [1, 1, 0, 0], max_lag=2) == pytest.approx(2.0)
+
+
+def test_n_eff_of_blocks_repeated_lookahead_times_is_n_over_lookahead():
+    # Each independent hit repeated on 5 consecutive candles -> design effect 5.
+    rng = np.random.default_rng(3)
+    hits = np.repeat(rng.integers(0, 2, 4000), 5)
+    n_eff = backtest.effective_sample_size(list(range(len(hits))), list(hits), max_lag=5)
+    assert n_eff == pytest.approx(4000, rel=0.1)
+
+
+def test_n_eff_of_independent_hits_is_about_n():
+    rng = np.random.default_rng(4)
+    hits = rng.integers(0, 2, 20000)
+    n_eff = backtest.effective_sample_size(list(range(len(hits))), list(hits), max_lag=5)
+    assert n_eff == pytest.approx(20000, rel=0.05)
+
+
+def test_n_eff_never_exceeds_n_and_handles_degenerate_input():
+    assert backtest.effective_sample_size([], [], max_lag=5) == 0.0
+    assert backtest.effective_sample_size([1, 2, 3], [1, 1, 1], max_lag=5) == 3.0   # no variance to correct
+    assert backtest.effective_sample_size([0, 1], [1, 0], max_lag=2) == 2.0          # negative corr floored
+
+
+def test_buckets_carry_n_eff_and_their_directions_base_rate(scripted):
+    cfg, _, _ = scripted
+    res = backtest.run_backtest(cfg)
+    # 18 scored positions (9..27 minus the tie at 14): bullish at 9..13 (5), bearish at 15..27 (13).
+    assert res["base_rates"] == {"bullish": pytest.approx(5 / 18), "bearish": pytest.approx(13 / 18), "total": 18}
+    b = res["indicator_buckets"]
+    assert b["rsi_bullish"]["base_rate"] == pytest.approx(5 / 18)
+    assert b["rsi_bearish"]["base_rate"] == pytest.approx(13 / 18)
+    # rsi calls sit 2 candles apart and LOOKAHEAD is 2, so no outcome windows overlap: n_eff == n.
+    assert b["rsi_bullish"]["n_eff"] == 8 and b["rsi_bearish"]["n_eff"] == 10
+    for section in ("strength_buckets", "indicator_buckets", "divergence_buckets"):
+        for bucket in res[section].values():
+            assert 0 < bucket["n_eff"] <= bucket["total"]
+
+
+def test_confidence_reports_n_eff_and_base_rate_and_flags_on_n_eff():
+    results = {"lookahead_candles": 5, "strength_buckets": {
+        "bullish_3": {"hits": 530, "total": 1000, "n_eff": 12.0, "base_rate": 0.51}}}
+    sig = backtest.get_confidence(results, _snap(a="bullish", b="bullish", c="bullish"), {}, 15)["signal"]
+    assert sig["n"] == 1000 and sig["n_eff"] == 12.0 and sig["base_rate"] == 0.51
+    assert sig["low_sample"] is True                                        # 1000 rows, ~12 independent

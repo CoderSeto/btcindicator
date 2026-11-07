@@ -234,3 +234,27 @@ def test_macd_phrase_describes_a_state_not_a_fresh_cross():
         detail = outlook.build_outlook(snap(macd=direction), NO_DIV)["detail"]
         assert "just crossed" not in detail
         assert "MACD is " + ("above" if direction == "bullish" else "below") + " its signal line" in detail
+
+
+def test_confidence_lines_show_the_base_rate_and_the_effective_sample():
+    # A hit rate means little without what a no-skill call would have scored in the same window,
+    # and n overstates the evidence when outcome windows overlap (REVIEW_FINDINGS D2/D3).
+    conf = {
+        "available": True, "lookahead_candles": 5,
+        "signal": {"direction": "bullish", "rate": 0.53, "n": 1980, "n_eff": 571.6,
+                   "base_rate": 0.512, "low_sample": False},
+    }
+    assert outlook._confidence_lines(conf) == [
+        "Historically, this signal pattern has been followed by a bullish move within 5 candles 53% "
+        "of the time, against a 51% base rate for any window (n=1,980, about 572 independent)."
+    ]
+
+
+def test_weighted_line_says_when_no_weight_carries_a_measured_edge():
+    s = snap(rsi="bullish", macd="bullish")
+    weighted = {"available": True, "direction": "bullish", "weighted_pct": 1.0,
+                "breakdown": {"rsi": {"vote": "bullish", "weight": 1.0},
+                              "macd": {"vote": "bullish", "weight": 1.0}}}
+    line = outlook._weighted_line(weighted, s)
+    assert "no indicator voting now has a measured edge over the base rate" in line
+    assert "%" not in line                                                  # no conviction figure to quote

@@ -734,3 +734,39 @@ def test_weights_note_does_not_claim_agg_delta_is_always_unit_weight(env):
     table = next(d.value for d in at.dataframe if "Weight" in d.value.columns).set_index("Indicator")["Weight"]
     assert table["Agg. Exchange Delta"] == "1.40"                          # 1 + 2.0 * (0.70 - 0.5)
     assert "aggregated exchange delta always show 1.00" not in all_text(at)
+
+
+
+def test_weights_table_explains_each_weight_and_noise_stays_at_one(env):
+    import dashboard_data
+    votes = {k: v for k, v in dashboard_data.load_state(cfg).snapshot.individual.items()
+             if k in ("sma_cross", "ema_cross", "macd") and v != "neutral"}
+    assert len(votes) >= 2
+    (strong, sd), (noisy, nd) = list(votes.items())[:2]
+    pathlib.Path(cfg.BACKTEST_RESULTS_PATH).write_text(json.dumps({
+        "product_id": "BTC-USD", "granularity": 60, "candles_used": 4000, "generated_at": "2026-11-07T00:00:00+00:00",
+        "lookahead_candles": 5, "strength_buckets": {}, "divergence_buckets": {},
+        "base_rates": {"bullish": 0.5, "bearish": 0.5, "total": 3900},
+        "indicator_buckets": {
+            f"{strong}_{sd}": {"hits": 650, "total": 1000, "n_eff": 300.0, "base_rate": 0.5},   # z ~ 5.2
+            f"{noisy}_{nd}": {"hits": 1030, "total": 2000, "n_eff": 570.0, "base_rate": 0.5},   # 51.5%, z ~ 0.7
+        },
+    }))
+    at = run()
+    no_exception(at)
+    table = next(d.value for d in at.dataframe if "Weight" in d.value.columns).set_index("Indicator")
+    assert table.loc[long(strong), "Weight"] == "1.30"
+    assert "edge +15.0 pts" in table.loc[long(strong), "Why"]
+    assert table.loc[long(noisy), "Weight"] == "1.00"
+    assert "within noise" in table.loc[long(noisy), "Why"]
+
+
+def test_sidebar_asks_for_a_rerun_when_results_predate_effective_sample_sizes(env):
+    pathlib.Path(cfg.BACKTEST_RESULTS_PATH).write_text(json.dumps({
+        "product_id": "BTC-USD", "granularity": 60, "candles_used": 3999, "generated_at": "2026-11-07T00:00:00+00:00",
+        "lookahead_candles": 5, "strength_buckets": {}, "divergence_buckets": {}, "indicator_buckets": {}}))
+    assert "re-run the backtest" in sidebar_text(run())
+
+
+def long(name):
+    return {"sma_cross": "SMA Cross", "ema_cross": "EMA Cross", "macd": "MACD"}[name]

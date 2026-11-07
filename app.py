@@ -24,6 +24,7 @@ import kalshi_api
 import kalshi_tracking
 import orderbook
 import orderbook_feeds
+import weighting
 from charts import build_figure
 from dashboard_data import load_state
 from main import log_alert, log_signal_snapshot
@@ -191,6 +192,11 @@ if cached_results and "error" not in cached_results:
         f"Last backtest: {cached_results['candles_used']} candles of "
         f"{cached_results['product_id']}, generated {gen_time} UTC"
     )
+    if "base_rates" not in cached_results:
+        st.sidebar.caption(
+            "\u26A0\uFE0F These results predate overlap-corrected sample sizes and base rates -- "
+            "re-run the backtest so the hit rates and weights are measured honestly."
+        )
 elif cached_results and "error" in cached_results:
     st.sidebar.caption(f"Last backtest attempt failed: {cached_results['error']}")
 else:
@@ -733,19 +739,35 @@ with tab_notes, st.container(height=TAB_BODY_HEIGHT, border=False):
 
         st.markdown("**Per-indicator weights**")
         breakdown = state.weighted.get("breakdown", {})
+        weight_details = weighting.compute_weight_details(state.backtest_results, cfg)
+
+        def _why(name, vote):
+            d = weight_details.get(name, {}).get(vote)
+            if d is None:
+                return "not backtestable"
+            if d["reason"] == "no_data":
+                return "no backtest data"
+            edge = f"edge {d['edge'] * 100:+.1f} pts vs {d['base_rate'] * 100:.0f}% base"
+            if d["reason"] == "small_sample":
+                return f"{edge}; only ~{d['n_eff']:.0f} independent samples"
+            if d["reason"] == "within_noise":
+                return f"{edge}, within noise (z={d['z']:.1f})"
+            return f"{edge}, z={d['z']:.1f}, ~{d['n_eff']:.0f} independent"
+
         if breakdown:
             rows = [
                 {"Indicator": long_labels.get(name, name), "Vote": v["vote"].upper(),
-                 "Weight": f"{v['weight']:.2f}"}
+                 "Weight": f"{v['weight']:.2f}", "Why": _why(name, v["vote"])}
                 for name, v in breakdown.items()
             ]
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         else:
             st.caption("Nothing directional to weigh right now.")
         st.caption(
-            "Weight 1.00 = counts the same as unweighted (no backtest data, or a coin-flip "
-            "historical hit rate). Above 1.00 = this indicator's calls have historically been "
-            "right more often; below 1.00 = less often. Order book and book flow always show "
+            "Weight 1.00 = counts the same as unweighted: no backtest data, too few independent "
+            f"samples, or an edge over the base rate within {cfg.INDICATOR_WEIGHT_MIN_Z:.0f} "
+            "standard errors of zero (noise). Above 1.00 = this indicator's calls have beaten "
+            "the window's base rate for that direction; below 1.00 = done worse than it. Order book and book flow always show "
             "1.00 (no historical depth data exists). Aggregated exchange delta shows 1.00 until "
             "`python backtest_agg_delta.py` has been run, then a Binance.US-only estimate."
         )
