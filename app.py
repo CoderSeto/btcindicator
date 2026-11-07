@@ -260,9 +260,14 @@ if alert_fired:
 # there's no one-frame lag: editing a strike reruns the script, and this
 # reads the new value before the widget is drawn again.
 auto_track = st.session_state.get("kalshi_auto_track", True)
+# KXBTC15M is a BTC/USD contract. Auto-tracking it on any other pair would
+# price a ~$75k BTC strike against that pair's candles (ETH, SOL, or BTC in
+# EUR) and log the result under the BTC ticker, so it only runs on BTC-USD.
+KALSHI_PAIR = "BTC-USD"
+kalshi_pair_ok = product_id == KALSHI_PAIR
 
 kalshi_live = None
-if auto_track:
+if auto_track and kalshi_pair_ok:
     kalshi_live = kalshi_api.current_btc15m_market()
     if kalshi_live["available"]:
         # Strike only resets when the window itself actually changes -- so a
@@ -421,6 +426,9 @@ with left:
                         help="Pulls the currently open KXBTC15M contract's strike and close "
                              "time from Kalshi's public API each refresh.")
 
+        if auto_track and not kalshi_pair_ok:
+            st.caption(f"Auto-track only tracks KXBTC15M on {KALSHI_PAIR} -- on {product_id} "
+                       "this is a plain calculator on the values above.")
         if auto_track and kalshi_live and not kalshi_live["available"]:
             st.caption(f"\u26A0\uFE0F Auto-track couldn't reach Kalshi ({kalshi_live['reason']}) "
                        "-- using the values above.")

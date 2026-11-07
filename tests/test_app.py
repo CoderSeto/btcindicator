@@ -649,6 +649,24 @@ def test_chart_tab_renders_without_error(env):
 # ---------- review regressions (see REVIEW_FINDINGS.md) ----------
 
 
+def test_kalshi_auto_track_only_follows_the_btc_contract_on_btc_usd(env):
+    # KXBTC15M is a BTC/USD contract. On ETH-USD the page would otherwise price the BTC strike
+    # (~$75.7k) against ETH candles and log a ~0% P(YES) under the BTC ticker.
+    cfg.LOG_KALSHI_PREDICTIONS = True
+    at = run()
+    path = pathlib.Path(cfg.KALSHI_PREDICTIONS_LOG_PATH)
+    path.unlink()
+    calls = env.kalshi_calls
+    eth = env.df.copy()
+    eth[["open", "high", "low", "close"]] /= 25.0                          # ~$3k, an ETH-like price
+    env.df = eth
+    at.sidebar.selectbox[0].select("ETH-USD").run()
+    no_exception(at)
+    assert env.kalshi_calls == calls                                       # the BTC market isn't fetched
+    assert not path.exists()                                               # nor logged against ETH prices
+    assert "only tracks KXBTC15M on BTC-USD" in all_text(at)
+
+
 def test_settlement_averaging_caveat_states_the_right_direction(env):
     # Averaging lowers the terminal variance, which makes the true probability MORE extreme than
     # the point-in-time model (see test_kalshi.py::test_settlement_averaging_makes_the_true_
