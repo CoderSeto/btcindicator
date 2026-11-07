@@ -374,8 +374,9 @@ such, not slipped in quietly.
     Measured from the user's machine, the newest 1-minute candle advanced
     23:17 -> 23:22 -> 23:27, with its close frozen in between (even a forming
     candle's 24-second-old snapshot), up to 5 minutes old and $48 off
-    `/ticker`. The same request with `start`/`end` is a `MISS` with the
-    just-closed minute, so `get_candles` always sends a range ending now.
+    `/ticker`. The same request with `start`/`end` was a `MISS` in all 18 of
+    18 polls, up to the forming minute, so `get_candles` always sends a range
+    ending now.
     Never drop it to "simplify". Any price someone acts on still comes from
     `data_fetch.latest_price()` (the ticker, with a flagged fallback),
     because even a fresh candle lags the last trade. Never call the network

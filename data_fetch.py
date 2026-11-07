@@ -26,8 +26,9 @@ def get_candles(product_id: str, granularity: int, limit: int = 200, now: dateti
     it with `Cache-Control: public, max-age=300`: from the user's machine it
     came back a Cloudflare HIT, 113s old, its newest candle two minutes behind,
     and over 10 minutes it advanced only every 5 (gotcha #19). A range ending
-    at the current instant is a different URL every call, so it's a MISS that
-    returned the minute that had just closed.
+    at the current instant is a different URL every call: in 18 polls over 3
+    minutes it was a MISS every time, and 17 of 18 included the current,
+    still-forming minute (drop_forming_candle keeps that out of the signals).
     """
     now = now or datetime.now(timezone.utc)
     span = min(limit + 1, MAX_CANDLE_SPAN)             # +1: the newest bucket may still be forming
