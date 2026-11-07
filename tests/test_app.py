@@ -818,3 +818,18 @@ def test_reruns_share_one_kalshi_poll_within_the_poll_interval(env):
     at.sidebar.button[0].click().run()                                     # "Refresh now"
     assert env.kalshi_calls == 1
     assert at.number_input(key="kalshi_minutes").value == 7.5              # countdown from the clock
+
+
+def test_the_page_uses_no_deprecated_streamlit_apis(env, caplog):
+    # use_container_width is deprecated ("will be removed after 2025-12-31"); width="stretch"
+    # replaces it on st.button / st.dataframe / st.plotly_chart from Streamlit 1.51 on, which is
+    # why requirements.txt pins streamlit>=1.51.
+    import logging
+    assert "use_container_width" not in (ROOT / "app.py").read_text()     # incl. feed-only panels
+    go_live(env)                                                           # render the feed tables too
+    with caplog.at_level(logging.WARNING, logger="streamlit"):
+        at = run()
+    no_exception(at)
+    deprecations = [r.getMessage() for r in caplog.records
+                    if "deprecat" in r.name or "use_container_width" in r.getMessage()]
+    assert deprecations == []

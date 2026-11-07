@@ -140,7 +140,7 @@ product_id = st.sidebar.selectbox(
 refresh_seconds = st.sidebar.slider("Refresh interval (s)", 5, 120, cfg.POLL_INTERVAL, 5)
 # Upper bound is the full signal set: 6 candle-based + orderbook + book_flow + agg_delta.
 alert_threshold = st.sidebar.slider("Alert threshold (indicators aligned)", 1, 9, cfg.COMPOSITE_ALERT_THRESHOLD)
-st.sidebar.button("Refresh now", use_container_width=True)
+st.sidebar.button("Refresh now", width="stretch")
 st.sidebar.caption("Changes here apply immediately. Edit config.py to change other defaults "
                     "(indicator periods, order book depth, etc).")
 
@@ -202,7 +202,7 @@ elif cached_results and "error" in cached_results:
 else:
     st.sidebar.caption(f"No backtest yet for {product_id} at this granularity.")
 
-run_backtest_clicked = st.sidebar.button("Run backtest now", use_container_width=True)
+run_backtest_clicked = st.sidebar.button("Run backtest now", width="stretch")
 st.sidebar.caption(
     f"Pulls ~{cfg.BACKTEST_HISTORY_CANDLES} historical candles and checks how often each "
     "signal pattern actually preceded a move. Takes 10-30s. Can also run standalone: "
@@ -536,7 +536,7 @@ with tab_chart:
     # The one panel deliberately allowed to overflow the fold. Everything else
     # on the page is sized to fit a viewport; a price chart squeezed into
     # 330px would be useless, so this is the scroll the layout budgets for.
-    st.plotly_chart(build_figure(df, cfg), use_container_width=True)
+    st.plotly_chart(build_figure(df, cfg), width="stretch")
 
 with tab_book, st.container(height=TAB_BODY_HEIGHT, border=False):
     if not cfg.ENABLE_BOOK_FEEDS:
@@ -591,7 +591,7 @@ with tab_book, st.container(height=TAB_BODY_HEIGHT, border=False):
             for venue, m in agg["venues"].items()
         ]
         if venue_rows:
-            st.dataframe(pd.DataFrame(venue_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(venue_rows), width="stretch", hide_index=True)
         for venue, reason in (agg.get("excluded") or {}).items():
             st.caption(f"⚠️ {venue} excluded from the aggregate: {reason}")
 
@@ -610,7 +610,7 @@ with tab_book, st.container(height=TAB_BODY_HEIGHT, border=False):
                 }
                 for w in held_walls[:8]
             ]
-            st.dataframe(pd.DataFrame(wall_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(wall_rows), width="stretch", hide_index=True)
         else:
             st.caption("No resting walls have held long enough to report.")
 
@@ -648,7 +648,7 @@ with tab_feeds, st.container(height=TAB_BODY_HEIGHT, border=False):
                 whale_df["time"] = pd.to_datetime(whale_df["time"], unit="s").dt.strftime("%H:%M:%S")
                 whale_df["notional"] = whale_df["notional"].map(lambda v: f"${v:,.0f}")
                 st.dataframe(whale_df[["time", "exchange", "side", "notional", "price"]],
-                             use_container_width=True, hide_index=True)
+                             width="stretch", hide_index=True)
             else:
                 st.caption("None yet this session.")
         with liq_col:
@@ -659,7 +659,7 @@ with tab_feeds, st.container(height=TAB_BODY_HEIGHT, border=False):
                 liq_df["time"] = pd.to_datetime(liq_df["time"], unit="s").dt.strftime("%H:%M:%S")
                 liq_df["notional"] = liq_df["notional"].map(lambda v: f"${v:,.0f}")
                 st.dataframe(liq_df[["time", "exchange", "liquidated_side", "notional", "price"]],
-                             use_container_width=True, hide_index=True)
+                             width="stretch", hide_index=True)
             else:
                 st.caption("None yet this session.")
 
@@ -680,7 +680,7 @@ with tab_alerts, st.container(height=TAB_BODY_HEIGHT, border=False):
                 "is the simplest fix -- a fresh one will be created on the next alert."
             )
         else:
-            st.dataframe(log_df.tail(25).iloc[::-1], use_container_width=True, hide_index=True)
+            st.dataframe(log_df.tail(25).iloc[::-1], width="stretch", hide_index=True)
     else:
         st.caption("No alerts logged yet -- they'll show up here once enough indicators align.")
 
@@ -771,7 +771,7 @@ with tab_notes, st.container(height=TAB_BODY_HEIGHT, border=False):
                  "Weight": f"{v['weight']:.2f}", "Why": _why(name, v["vote"])}
                 for name, v in breakdown.items()
             ]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
         else:
             st.caption("Nothing directional to weigh right now.")
         st.caption(
