@@ -37,6 +37,15 @@ class SignalSnapshot:
         return max(self.bullish_count, self.bearish_count)
 
 
+def _side(a, b) -> str:
+    """Which way `a` sits relative to `b`. Equal is not a lean."""
+    if a > b:
+        return "bullish"
+    if a < b:
+        return "bearish"
+    return "neutral"
+
+
 def _evaluate_price_signals(last, prev, cfg) -> dict:
     """
     The 6 signals derivable purely from candle data (no order book).
@@ -52,7 +61,7 @@ def _evaluate_price_signals(last, prev, cfg) -> dict:
     elif last["sma_9"] < last["sma_21"] and prev["sma_9"] >= prev["sma_21"]:
         signals["sma_cross"] = "bearish"
     else:
-        signals["sma_cross"] = "bullish" if last["sma_9"] > last["sma_21"] else "bearish"
+        signals["sma_cross"] = _side(last["sma_9"], last["sma_21"])
 
     # EMA crossover
     if last["ema_12"] > last["ema_26"] and prev["ema_12"] <= prev["ema_26"]:
@@ -60,7 +69,7 @@ def _evaluate_price_signals(last, prev, cfg) -> dict:
     elif last["ema_12"] < last["ema_26"] and prev["ema_12"] >= prev["ema_26"]:
         signals["ema_cross"] = "bearish"
     else:
-        signals["ema_cross"] = "bullish" if last["ema_12"] > last["ema_26"] else "bearish"
+        signals["ema_cross"] = _side(last["ema_12"], last["ema_26"])
 
     # RSI
     if last["rsi"] < cfg.RSI_OVERSOLD:
@@ -76,10 +85,13 @@ def _evaluate_price_signals(last, prev, cfg) -> dict:
     elif last["macd"] < last["macd_signal"] and prev["macd"] >= prev["macd_signal"]:
         signals["macd"] = "bearish"
     else:
-        signals["macd"] = "bullish" if last["macd"] > last["macd_signal"] else "bearish"
+        signals["macd"] = _side(last["macd"], last["macd_signal"])
 
-    # Bollinger Bands
-    if last["close"] >= last["bb_upper"]:
+    # Bollinger Bands. A zero-width band (no movement over the period) has no
+    # "outside" to be stretched to -- the close sits on both bands at once.
+    if not last["bb_upper"] > last["bb_lower"]:
+        signals["bollinger"] = "neutral"
+    elif last["close"] >= last["bb_upper"]:
         signals["bollinger"] = "bearish"  # stretched to the upside
     elif last["close"] <= last["bb_lower"]:
         signals["bollinger"] = "bullish"  # stretched to the downside
