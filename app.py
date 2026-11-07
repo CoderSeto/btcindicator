@@ -288,7 +288,12 @@ kalshi_result = kalshi.fair_value(
     cfg.KALSHI_VOL_LOOKBACK_MINUTES, candle_seconds=cfg.GRANULARITY,
 )
 
-if kalshi_result["available"] and kalshi_live and kalshi_live["available"]:
+# Only log a row that prices the tracked market's own strike. A hand-edited
+# strike survives refreshes on purpose, but its P(YES) answers a different
+# question from the one the ticker settles, and the calibration report would
+# score it against that ticker's outcome anyway.
+if (kalshi_result["available"] and kalshi_live and kalshi_live["available"]
+        and kalshi_result["strike"] == kalshi_live["strike"]):
     kalshi_tracking.log_prediction(
         cfg,
         ticker=kalshi_live["ticker"],

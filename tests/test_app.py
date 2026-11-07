@@ -648,6 +648,17 @@ def test_chart_tab_renders_without_error(env):
 
 # ---------- review regressions (see REVIEW_FINDINGS.md) ----------
 
+def test_manually_edited_strike_is_never_logged_under_the_live_ticker(env):
+    # The calibration report scores each logged row against the *ticker's* real outcome, which
+    # settles on the market's own strike. A row computed at a hand-typed strike but tagged with
+    # that ticker scores the model on a question nobody asked it.
+    cfg.LOG_KALSHI_PREDICTIONS = True
+    at = run()
+    at.number_input(key="kalshi_strike").set_value(75_000.0).run()
+    at.run()
+    df = pd.read_csv(cfg.KALSHI_PREDICTIONS_LOG_PATH)
+    assert list(df["strike"]) == [75_743.66]                               # only the auto-tracked row
+
 
 def test_kalshi_auto_track_only_follows_the_btc_contract_on_btc_usd(env):
     # KXBTC15M is a BTC/USD contract. On ETH-USD the page would otherwise price the BTC strike
