@@ -299,13 +299,20 @@ and is what any new tests should match:
   wall large enough to hide itself under a mean.
 
 Also covered now: `kalshi.py`, `weighting.py`, `backtest.py`, `backtest_agg_delta.py`,
-`kalshi_tracking.py`, `indicators.py` and `divergence.py`. Writing them turned up three real bugs, all fixed:
+`kalshi_tracking.py`, `kalshi_api.py`, `indicators.py` and `divergence.py`. Writing them turned up three real bugs, all fixed:
 `compute_calibration` borrowed an older row's Kalshi quote (`groupby().first()`
 is per-column) and crashed when only some contracts had quotes, and
 `reconstruct_agg_delta_series` let float residue pose as a reading in an empty
 window.
 
-Still uncovered: `outlook.py`, `kalshi_api.py` and the Streamlit layer.
+Still uncovered: `outlook.py` and the Streamlit layer.
+
+`tests/test_kalshi_api.py` runs against verbatim Kalshi payloads saved in
+`tests/fixtures/` (captured 2026-11-07; the capture URLs are in the test's
+docstring -- re-capture if Kalshi changes its schema). Host note: the tests
+mock the network, and `kalshi_api.BASE_URL` is `external-api.kalshi.com`, but
+the payloads were captured from `api.elections.kalshi.com`, the host that
+answered from the sandbox. Verify BASE_URL against Kalshi's current docs.
 
 Known coupling, pinned by a test in `tests/test_indicators.py`: `indicators.py`
 names its columns from config (`sma_{SMA_FAST}` ...) but `signals.py` reads the
