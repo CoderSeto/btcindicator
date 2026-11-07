@@ -635,9 +635,12 @@ Worth understanding *why* a gap exists before trusting it.
   well-known trap where price ticks above the strike right at the buzzer
   and the contract still settles NO, because the average of the closing
   minute decided it, not the last print. This model treats settlement as
-  a single point-in-time draw, which is a reasonable approximation for
-  most of the window but overstates how extreme the true probability
-  gets in the final minute or two.
+  a single point-in-time draw. Averaging lowers the variance of what
+  actually settles, so the true probability is *more* extreme than the
+  model's -- the model is too close to 50%, never too far from it. That's
+  about a point early in the window, but large at the end: with 1 minute
+  left and spot 5bp above the strike the model says ~79% where the
+  averaged settlement is ~92%.
 - **No drift, no jumps.** Standard simplifying assumption for pricing
   this kind of contract — not a claim that BTC actually moves this way.
 - **Not financial advice.** A calculator, not a guarantee, and this

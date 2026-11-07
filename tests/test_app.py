@@ -644,3 +644,15 @@ def test_chart_tab_renders_without_error(env):
     no_exception(at)
     charts = at.get("plotly_chart")
     assert len(charts) == 1
+
+
+# ---------- review regressions (see REVIEW_FINDINGS.md) ----------
+
+
+def test_settlement_averaging_caveat_states_the_right_direction(env):
+    # Averaging lowers the terminal variance, which makes the true probability MORE extreme than
+    # the point-in-time model (see test_kalshi.py::test_settlement_averaging_makes_the_true_
+    # probability_more_extreme). The Notes tab previously said the opposite.
+    text = all_text(run())
+    assert "overstates how extreme" not in text
+    assert "less extreme than the true" in text

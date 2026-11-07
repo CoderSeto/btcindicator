@@ -195,3 +195,40 @@ def test_fair_value_expired_has_zero_std():
 def test_minutes_until_next_close(h, m, s, us, expected):
     now = datetime(2026, 1, 1, h, m, s, us, tzinfo=timezone.utc)
     assert kalshi.minutes_until_next_kalshi_close(now) == pytest.approx(expected, abs=1e-9)
+
+
+def _averaged_settlement_mc(spot, strike, minutes, vol, n=100_000, seed=7):
+    """
+    Independent reference for KXBTC15M's real settlement rule: YES iff the simple average of the
+    60 one-second index prints before close is >= strike (rules_primary in
+    tests/fixtures/kalshi_open_markets.json). Driftless GBM simulated second by second.
+    Only valid for minutes >= 1, where none of the averaging window has elapsed yet.
+    """
+    rng = np.random.default_rng(seed)
+    mpy = 365.25 * 24 * 60
+    dt = 1 / 60 / mpy
+    pre = minutes / mpy - 60 * dt
+    log_s = np.log(spot) - 0.5 * vol ** 2 * pre + vol * np.sqrt(pre) * rng.standard_normal(n)
+    total = np.zeros(n)
+    for _ in range(60):
+        log_s += -0.5 * vol ** 2 * dt + vol * np.sqrt(dt) * rng.standard_normal(n)
+        total += np.exp(log_s)
+    p = float(((total / 60) >= strike).mean())
+    return p, (p * (1 - p) / n) ** 0.5
+
+
+@pytest.mark.parametrize("minutes", [1.0, 2.0, 5.0])
+@pytest.mark.parametrize("side", [+1, -1])
+def test_settlement_averaging_makes_the_true_probability_more_extreme(minutes, side):
+    # Pins the DIRECTION of the documented averaging limitation. Averaging the last 60s lowers the
+    # terminal variance from sigma^2*T to about sigma^2*(T - 2/3 min), so the true P(YES) sits
+    # further from 50% than the point-in-time N(d2) -- the model is too *timid*, not too extreme.
+    # (Measured: at 1 min left and spot 5bp above strike, model 0.79 vs averaged ~0.92.)
+    spot = 75_000.0
+    strike = spot / (1 + side * 5e-4)                                       # spot 5bp above / below
+    model = kalshi.crossing_probability(spot, strike, minutes, 0.45)
+    true_p, se = _averaged_settlement_mc(spot, strike, minutes, 0.45)
+    if side > 0:
+        assert model > 0.5 and true_p > model + 5 * se
+    else:
+        assert model < 0.5 and true_p < model - 5 * se

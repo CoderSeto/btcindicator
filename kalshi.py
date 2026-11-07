@@ -23,11 +23,16 @@ Known limitations, stated plainly rather than glossed over:
     contract decided by a small margin, that gap matters.
   - Settlement is actually a 60-SECOND AVERAGE of the reference index at
     the window's close, not a single point-in-time price. This model
-    treats it as a single point-in-time draw -- a reasonable
-    approximation for most of the window, but it overstates how extreme
-    the true probability gets in the final minute or two (the real
-    distribution has slightly lower variance near expiry than modeled
-    here, since averaging smooths out some of the terminal noise).
+    treats it as a single point-in-time draw. Averaging LOWERS the
+    terminal variance (to roughly sigma^2 * (T - 2/3 min) instead of
+    sigma^2 * T), so the true probability is MORE extreme than this
+    model's -- the model is too close to 50%, never too far from it. The
+    gap is small early in the window (~1 point at 14 min) and large near
+    the end: with 1 minute left and spot 5bp above the strike the model
+    says ~79% where the averaged settlement is ~92% (see
+    tests/test_kalshi.py::test_settlement_averaging_makes_the_true_
+    probability_more_extreme). Inside the final minute part of the
+    average is already fixed, which this model ignores entirely.
   - Assumes driftless geometric Brownian motion (no jumps, no trend) --
     a standard simplifying assumption for pricing this kind of contract,
     not a claim that BTC actually moves this way. It deliberately ignores
@@ -221,6 +226,7 @@ if __name__ == "__main__":
         print(
             "\n(Model-only estimate: Coinbase price used as a proxy for Kalshi's actual "
             "multi-exchange\nsettlement source; assumes driftless GBM; ignores the final "
-            "60-second settlement averaging.\nSee README for full limitations. Not "
-            "financial advice.)"
+            "60-second settlement averaging,\nwhich makes this LESS extreme than the true "
+            "probability, by a lot in the last 1-2 minutes.\nSee README for full limitations. "
+            "Not financial advice.)"
         )
