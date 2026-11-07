@@ -282,3 +282,14 @@ def test_outcome_resolution_reads_the_real_finalized_payload(http):
     # ...and the still-open market (result == "") is left unresolved for next time.
     http.respond = FakeResp({"market": OPEN_MARKET})
     assert kalshi_tracking.resolve_outcomes([OPEN_MARKET["ticker"]], {}) == {}
+
+
+def test_a_close_time_without_a_timezone_is_read_as_utc_not_a_crash():
+    # Real payloads end in "Z" (both fixtures, and the live API on 2026-11-07), but a naive
+    # timestamp used to raise TypeError (naive minus aware) straight out of
+    # current_btc15m_market(), which only catches network errors -- an exception on the page.
+    parsed = kalshi_api.parse_market({**OPEN_MARKET, "close_time": "2026-11-07T18:15:00"},
+                                     now=datetime(2026, 11, 7, 18, 7, 30, tzinfo=timezone.utc))
+    assert parsed["available"] is True
+    assert parsed["minutes_remaining"] == pytest.approx(7.5)
+    assert parsed["close_time"].tzinfo is not None

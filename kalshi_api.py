@@ -76,6 +76,10 @@ def parse_market(market: dict, now: datetime = None) -> dict:
         close_time = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
     except ValueError:
         return {"available": False, "reason": f"Couldn't parse close_time: {close_time_str!r}"}
+    if close_time.tzinfo is None:
+        # Kalshi's timestamps are UTC ("...Z"); a naive one would otherwise raise
+        # TypeError (naive minus aware) below, which no caller catches.
+        close_time = close_time.replace(tzinfo=timezone.utc)
 
     now = now or datetime.now(timezone.utc)
     minutes_remaining = max(0.0, (close_time - now).total_seconds() / 60.0)
