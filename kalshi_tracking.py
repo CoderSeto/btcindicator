@@ -154,7 +154,9 @@ def compute_calibration(df: pd.DataFrame, outcomes: dict, bucket_size: float, mi
     df["actual"] = (df["outcome"] == "yes").astype(int)
 
     n_buckets = int(round(1.0 / bucket_size))
-    bounds = [i * bucket_size for i in range(n_buckets + 1)]
+    # Rounded: 3 * 0.2 is 0.6000000000000001, which would push a prediction of
+    # exactly 0.6 down into the 40-60% bucket.
+    bounds = [round(i * bucket_size, 10) for i in range(n_buckets + 1)]
 
     def _bucketize(series):
         rows = []

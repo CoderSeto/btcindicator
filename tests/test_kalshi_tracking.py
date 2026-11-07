@@ -277,3 +277,15 @@ def test_header_constant_matches_what_is_written(tmp_path):
     kt.log_prediction(cfg, "T1", 100, 101, 5, 0.6, 0.5)
     with open(cfg.KALSHI_PREDICTIONS_LOG_PATH, newline="") as f:
         assert next(csv.reader(f)) == kt.PREDICTION_LOG_HEADER == COLUMNS
+
+
+# ---------- review regressions (see REVIEW_FINDINGS.md) ----------
+
+
+def test_a_prediction_exactly_on_a_bucket_edge_lands_in_the_upper_bucket():
+    # Bounds were built as i * 0.2, and 3 * 0.2 == 0.6000000000000001, so a p_yes of exactly 0.6
+    # fell into 40-60% instead of 60-80% (lower bounds are inclusive everywhere else).
+    df = _df([("A", 0.6, 1.0, None, None), ("B", 0.4, 1.0, None, None)])
+    table = kt.compute_calibration(df, {"A": "yes", "B": "no"}, 0.2, 1)["model"].set_index("bucket")
+    assert table.loc["60-80%", "n"] == 1
+    assert table.loc["40-60%", "n"] == 1
