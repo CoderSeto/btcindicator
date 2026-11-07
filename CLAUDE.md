@@ -299,13 +299,26 @@ and is what any new tests should match:
   wall large enough to hide itself under a mean.
 
 Also covered now: `kalshi.py`, `weighting.py`, `backtest.py`, `backtest_agg_delta.py`,
-`kalshi_tracking.py`, `kalshi_api.py`, `indicators.py` and `divergence.py`. Writing them turned up three real bugs, all fixed:
+`kalshi_tracking.py`, `kalshi_api.py`, `indicators.py`, `divergence.py`,
+`outlook.py`, `dashboard_data.py`, `charts.py` and `app.py`. Writing them turned up three real bugs, all fixed:
 `compute_calibration` borrowed an older row's Kalshi quote (`groupby().first()`
 is per-column) and crashed when only some contracts had quotes, and
 `reconstruct_agg_delta_series` let float residue pose as a reading in an empty
 window.
 
-Still uncovered: `outlook.py` and the Streamlit layer.
+Every module now has tests. The dashboard is covered by `tests/test_app.py`
+using Streamlit's `AppTest` (the real `app.py` runs; only Coinbase REST, the
+feed handles and Kalshi's API are stubbed, and the live-feed scenario drives a
+real `BookAggregator` on a fake clock). `app.py`'s `_esc` and
+`_strike_path_liquidity` are lifted out with `ast` since a script can't be
+imported. Not covered: the WebSocket runner threads in `exchange_feeds.py` /
+`orderbook_feeds.py` (only their parsers and aggregators are), and visual
+layout/CSS, which needs a browser.
+
+Streamlit renders `$...$` as LaTeX, so every string with dollar amounts that
+reaches `st.caption`/`st.markdown`/`st.warning` must go through `_esc()` --
+including the divergence text inside the outlook, which was missed once and is
+now pinned by a test.
 
 `tests/test_kalshi_api.py` runs against verbatim Kalshi payloads saved in
 `tests/fixtures/` (captured 2026-11-07; the capture URLs are in the test's

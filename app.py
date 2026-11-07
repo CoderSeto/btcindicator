@@ -463,9 +463,9 @@ with right:
                      "neutral": "\u2696\ufe0f"}[snapshot.composite]
         st.markdown(f"**{lean_icon} {outlook_result['headline']}**")
         if outlook_result["detail"]:
-            st.caption(outlook_result["detail"])
+            st.caption(_esc(outlook_result["detail"]))
         if outlook_result["caution"]:
-            st.warning(outlook_result["caution"], icon="\u26A0\uFE0F")
+            st.warning(_esc(outlook_result["caution"]), icon="\u26A0\uFE0F")
         if outlook_result.get("book_note"):
             st.caption(_esc(f"\U0001F9F1 {outlook_result['book_note']}"))
         if outlook_result["weighted_line"]:
