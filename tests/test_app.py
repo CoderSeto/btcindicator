@@ -175,7 +175,7 @@ def no_exception(at):
 # ---------- the pure helpers, lifted from app.py ----------
 
 def _load_helpers():
-    tree = ast.parse((ROOT / "app.py").read_text())
+    tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
     wanted = {"_esc", "_strike_path_liquidity"}
     funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
     assert {f.name for f in funcs} == wanted
@@ -825,7 +825,7 @@ def test_the_page_uses_no_deprecated_streamlit_apis(env, caplog):
     # replaces it on st.button / st.dataframe / st.plotly_chart from Streamlit 1.51 on, which is
     # why requirements.txt pins streamlit>=1.51.
     import logging
-    assert "use_container_width" not in (ROOT / "app.py").read_text()     # incl. feed-only panels
+    assert "use_container_width" not in (ROOT / "app.py").read_text(encoding="utf-8")     # incl. feed-only panels
     go_live(env)                                                           # render the feed tables too
     with caplog.at_level(logging.WARNING, logger="streamlit"):
         at = run()

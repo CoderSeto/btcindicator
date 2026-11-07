@@ -354,6 +354,15 @@ such, not slipped in quietly.
     pins it per venue and checks that one taker-buy normalizes to "buy"
     on all three.
 
+18. **Windows doesn't read text as UTF-8 by default.** `open()` and
+    `Path.read_text()` without `encoding=` use the locale code page there
+    (cp1252), and `app.py` contains UTF-8 characters, so a bare
+    `read_text()` of it in `tests/test_app.py` stopped the whole suite at
+    collection on the user's machine while passing on Linux. Pass
+    `encoding="utf-8"` whenever a file can hold non-ASCII text.
+    `tests/test_portability.py` re-runs collection (and the tests that read
+    `app.py`) in a child interpreter with UTF-8 mode off and an ASCII locale.
+
 ## Testing approach
 
 There **is** now a committed suite, in `tests/`, run with `pytest` (add
