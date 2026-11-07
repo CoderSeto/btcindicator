@@ -41,6 +41,13 @@ from datetime import datetime, timezone
 import pandas as pd
 
 import kalshi_api
+from csv_utils import needs_header
+
+
+PREDICTION_LOG_HEADER = [
+    "timestamp", "ticker", "strike", "current_price", "minutes_remaining",
+    "p_yes", "annual_vol", "kalshi_yes_bid", "kalshi_yes_ask", "kalshi_last_price",
+]
 
 
 def log_prediction(cfg, ticker, strike, current_price, minutes_remaining, p_yes, annual_vol,
@@ -53,14 +60,12 @@ def log_prediction(cfg, ticker, strike, current_price, minutes_remaining, p_yes,
     """
     if not cfg.LOG_KALSHI_PREDICTIONS:
         return
-    file_exists = os.path.isfile(cfg.KALSHI_PREDICTIONS_LOG_PATH)
+    # Rotates an older-layout file aside rather than appending wider rows to it.
+    write_header = needs_header(cfg.KALSHI_PREDICTIONS_LOG_PATH, PREDICTION_LOG_HEADER)
     with open(cfg.KALSHI_PREDICTIONS_LOG_PATH, "a", newline="") as f:
         writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow([
-                "timestamp", "ticker", "strike", "current_price", "minutes_remaining",
-                "p_yes", "annual_vol", "kalshi_yes_bid", "kalshi_yes_ask", "kalshi_last_price",
-            ])
+        if write_header:
+            writer.writerow(PREDICTION_LOG_HEADER)
         writer.writerow([
             datetime.now(timezone.utc).isoformat(),
             ticker or "",

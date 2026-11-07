@@ -26,6 +26,7 @@ import orderbook_feeds
 import outlook
 import signals
 import weighting
+from csv_utils import needs_header
 
 
 # Fixed column order for both alert and signal logs, independent of which
@@ -75,33 +76,8 @@ def _book_log_values(snapshot: signals.SignalSnapshot) -> list:
     ]
 
 
-def _needs_header(path: str, header: list) -> bool:
-    """
-    Returns True if `header` still has to be written to `path`.
-
-    If the file exists but its header doesn't match -- which happens when a
-    new indicator or column is added to a log that already has rows in it --
-    the old file is renamed aside and a fresh one is started. Appending
-    wider rows under a narrower header is exactly the failure that broke
-    pd.read_csv() here once before (see CLAUDE.md, gotcha #1); rotating
-    keeps every file internally consistent, and keeps the old data
-    readable, instead of corrupting both.
-    """
-    if not os.path.isfile(path):
-        return True
-    try:
-        with open(path, newline="") as f:
-            existing = next(csv.reader(f), None)
-    except OSError:
-        return True
-    if existing == header:
-        return False
-
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    archived = f"{path}.{stamp}.bak"
-    os.rename(path, archived)
-    print(f"[log] {path} had an older column layout -- moved it to {archived} and started a new file.")
-    return True
+# Shared with kalshi_tracking.py; kept under the old name for existing callers.
+_needs_header = needs_header
 
 
 def log_alert(snapshot: signals.SignalSnapshot):

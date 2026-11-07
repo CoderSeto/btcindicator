@@ -244,3 +244,36 @@ def test_report_end_to_end(tmp_path, capsys, fake_market):
     assert "Model Brier score: 0.0900" in out                # (0.7 - 1)^2 on A's closest row
     assert "Kalshi market Brier score: 0.1225" in out        # mid 0.65 -> 0.35^2
     assert json.loads((tmp_path / "outcomes.json").read_text()) == {"A": "yes"}
+
+
+# ---------- column layout changes between releases (CLAUDE.md gotcha #1) ----------
+
+def test_log_rotates_file_written_under_an_older_layout(tmp_path):
+    cfg = _cfg(tmp_path)
+    path = tmp_path / "preds.csv"
+    old_header = COLUMNS[:-1]                                 # an older release without kalshi_last_price
+    path.write_text(",".join(old_header) + "\nt,T0,100,101,5,0.6,0.5,,\n")
+
+    kt.log_prediction(cfg, "T1", 100, 101, 4, 0.7, 0.5, 0.6, 0.7, 0.65)
+
+    backups = list(tmp_path.glob("preds.csv.*.bak"))
+    assert len(backups) == 1
+    old = pd.read_csv(backups[0])                             # old data intact and still readable
+    assert list(old.columns) == old_header and list(old["ticker"]) == ["T0"]
+    new = pd.read_csv(path)                                   # fresh file: current header, one row
+    assert list(new.columns) == COLUMNS and list(new["ticker"]) == ["T1"]
+
+
+def test_log_same_layout_is_appended_not_rotated(tmp_path):
+    cfg = _cfg(tmp_path)
+    for m in (5, 4, 3):
+        kt.log_prediction(cfg, "T1", 100, 101, m, 0.6, 0.5)
+    assert not list(tmp_path.glob("*.bak"))
+    assert len(pd.read_csv(cfg.KALSHI_PREDICTIONS_LOG_PATH)) == 3
+
+
+def test_header_constant_matches_what_is_written(tmp_path):
+    cfg = _cfg(tmp_path)
+    kt.log_prediction(cfg, "T1", 100, 101, 5, 0.6, 0.5)
+    with open(cfg.KALSHI_PREDICTIONS_LOG_PATH, newline="") as f:
+        assert next(csv.reader(f)) == kt.PREDICTION_LOG_HEADER == COLUMNS

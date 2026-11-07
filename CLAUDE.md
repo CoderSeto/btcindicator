@@ -89,7 +89,8 @@ such, not slipped in quietly.
 **Interfaces**
 - `main.py` -- console loop. Also owns `log_alert()` and
   `log_signal_snapshot()`, the `ALL_SIGNAL_NAMES` / `BOOK_LOG_FIELDS`
-  fixed-schema constants both use, and `_needs_header()`, which rotates a
+  fixed-schema constants both use, and `_needs_header()` (now `csv_utils.needs_header`, shared with
+  `kalshi_tracking.log_prediction`), which rotates a
   log aside when its column layout changes between releases (see gotcha
   #1 below).
 - `dashboard_data.py` -- `load_state()`, the fetch+compute pipeline the
@@ -305,10 +306,7 @@ is per-column) and crashed when only some contracts had quotes, and
 window.
 
 Still uncovered: `backtest.py`, `indicators.py`, `divergence.py`,
-`outlook.py`, `kalshi_api.py` and the Streamlit layer. `log_prediction()` in
-`kalshi_tracking.py` also lacks the `_needs_header()` rotation that `main.py`'s
-logs have (gotcha #1), so a future column change would append wider rows to an
-old file.
+`outlook.py`, `kalshi_api.py` and the Streamlit layer.
 
 ## Common commands
 
