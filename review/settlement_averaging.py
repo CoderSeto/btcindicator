@@ -1,6 +1,8 @@
 """Run from the repo root: python review/settlement_averaging.py
 
-Model P(YES) (point-in-time N(d2)) vs a second-by-second Monte Carlo of KXBTC15M's real rule:
+The point-in-time N(d2) (kalshi.crossing_probability) and the settlement-average model
+(kalshi.settlement_probability, what fair_value() reports) vs a second-by-second Monte Carlo of
+KXBTC15M's real rule:
 YES iff the simple average of the 60 one-second prints before close >= strike. Driftless GBM.
 For T < 1 minute the already-elapsed part of the window is taken at the current price, which
 is an assumption (the real elapsed average is known on the day, not modelled here).
@@ -33,5 +35,7 @@ for T in (14, 5, 2, 1, 0.5, 0.25):
     for off_bps in (5, 15):
         S = 75_000.0; K = S/(1+off_bps/1e4)
         pm = kalshi.crossing_probability(S, K, T, vol)
+        pa = kalshi.settlement_probability(S, K, T, vol)
         p, se = mc(S, K, T, vol)
-        print(f"T={T:>5} min  spot {off_bps:>2}bp above strike  model={pm:.3f}  averaged(MC)={p:.3f} ±{se:.3f}  gap={p-pm:+.3f}")
+        print(f"T={T:>5} min  spot {off_bps:>2}bp above strike  point N(d2)={pm:.3f}  "
+              f"settlement_probability={pa:.3f}  Monte Carlo={p:.3f} ±{se:.3f}")

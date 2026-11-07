@@ -67,7 +67,11 @@ such, not slipped in quietly.
 - `backtest.py` -- pulls historical candles, replays `evaluate_price_only()`
   at every point, checks whether price actually moved as predicted within
   `BACKTEST_LOOKAHEAD_CANDLES`. Produces per-indicator AND per-composite
-  hit-rate buckets, saved to `backtest_results.json`.
+  hit-rate buckets, saved to `backtest_results.json`. Every bucket also
+  carries `n_eff` (`effective_sample_size()`: neighbouring rows share their
+  outcome window, so raw n overstates the evidence ~3.5x for state votes)
+  and `base_rate` (how often any scored window moved that way) -- see
+  gotcha #15.
 - `backtest_agg_delta.py` -- separately backtests `agg_delta`, using
   Binance.US's historical trade API (the only one of the three live
   exchanges with a practical time-range historical-trades endpoint --
@@ -78,8 +82,10 @@ such, not slipped in quietly.
   reflects Binance.US alone, not the combined 3-exchange live signal --
   an approximation, not a reconstruction.
 - `weighting.py` -- turns per-indicator hit rates into weights
-  (`weight = 1.0 + SCALE * (hit_rate - 0.5)`, clipped, falls back to 1.0
-  for no-data/small-sample), and computes a `weighted_conviction` score.
+  (`weight = 1.0 + SCALE * (hit_rate - base_rate)`, clipped; stays 1.0 for
+  no data, `n_eff < BACKTEST_MIN_SAMPLE`, or an edge within
+  `INDICATOR_WEIGHT_MIN_Z` standard errors -- `weight_details()` says which),
+  and computes a `weighted_conviction` score.
   **This is a separate, additive score. It never modifies
   `snapshot.composite`/`strength`, which still drives alerts and CSV
   logging.** See "Design principles" below for why.
@@ -92,10 +98,14 @@ such, not slipped in quietly.
   fixed-schema constants both use, and `_needs_header()` (now `csv_utils.needs_header`, shared with
   `kalshi_tracking.log_prediction`), which rotates a
   log aside when its column layout changes between releases (see gotcha
-  #1 below).
+  #1 below). Both loggers skip a row that repeats the file's last one
+  within `LOG_MIN_INTERVAL_SECONDS` (a different alert is always written),
+  because the dashboard reruns on every tick, click and tab.
 - `dashboard_data.py` -- `load_state()`, the fetch+compute pipeline the
   dashboard calls once per refresh.
-- `app.py` -- the Streamlit dashboard. Layout is deliberately
+- `app.py` -- the Streamlit dashboard. Works on a per-run copy of
+  config.py's settings (`cfg`), never the shared module -- see gotcha #14.
+  Layout is deliberately
   front-loaded: Kalshi calculator and top metrics first, heavier
   sections (chart, live feeds, alert log) collapsed in expanders.
 - `charts.py` -- Plotly figure builder.
@@ -105,9 +115,11 @@ such, not slipped in quietly.
 
 **Kalshi**
 - `kalshi.py` -- fair-value probability calculator for KXBTC15M-style
-  binary contracts. Standard lognormal/GBM crossing probability (the
-  N(d2) term from Black-Scholes). Pure math, no network calls except in
-  its own CLI entry point.
+  binary contracts. `settlement_probability()` prices what actually
+  settles -- the average of 60 one-second prints before close -- under
+  driftless GBM; `crossing_probability()` is the textbook point-in-time
+  N(d2), kept for comparison (`p_yes_point`). Pure math, no network calls
+  except in its own CLI entry point.
 - `kalshi_api.py` -- public (no-auth) Kalshi market-data client.
   `SERIES_TICKER = "KXBTC15M"` -- **not** `KXBTCD`, which is a different,
   separate hourly series (easy to conflate; cross-checked multiple
@@ -287,11 +299,32 @@ such, not slipped in quietly.
 
 13. **Kalshi's 60-second settlement average makes the true probability
     MORE extreme than the point-in-time model, not less.** The caveat was
-    written backwards in four places (docstring, README, CLI, dashboard).
-    Averaging lowers the terminal variance (~sigma^2 * (T - 2/3 min)), so
-    the model is too close to 50%: ~79% vs ~92% at 1 minute left, spot 5bp
-    above the strike. Pinned against a Monte Carlo of the real rule in
-    `tests/test_kalshi.py`; `review/settlement_averaging.py` prints the table.
+    once written backwards in four places (docstring, README, CLI,
+    dashboard). Averaging lowers the terminal variance (to sigma^2 * (T -
+    ~39.5s)), so a point-in-time N(d2) is too close to 50%: ~79% vs ~92% at 1
+    minute left, spot 5bp above the strike. `settlement_probability()` now
+    models the average and matches a Monte Carlo of the real rule
+    (`tests/test_kalshi.py`; `review/settlement_averaging.py` prints the
+    table). The one remaining approximation is the final minute, where the
+    already-taken prints are assumed equal to spot -- keep saying so in the
+    output if you touch it.
+
+14. **Streamlit sessions share module state.** Every browser tab's script
+    runs in one process, so `app.py` writing sidebar values into the
+    `config` module made a new tab open on the last tab's pair and
+    threshold, and let two live tabs render one pair's data under the
+    other's label. `app.py` now works on a per-run copy (`cfg`); anything
+    added to the page must take `cfg` explicitly and never assign to a
+    module attribute. The same goes for the logs: a rerun is not an
+    observation (hence `LOG_MIN_INTERVAL_SECONDS`).
+
+15. **Overlapping outcome windows make n lie.** The backtest scores every
+    candle against the next `BACKTEST_LOOKAHEAD_CANDLES`, so neighbouring
+    rows share most of their outcome and state votes fire on long runs:
+    on random walks the raw n overstated the evidence ~3.5x, and weights
+    built on it moved +/-0.08-0.16 from noise alone. Use a bucket's `n_eff`
+    for any sample-size judgement, and measure edge against its
+    `base_rate`, never against 0.5.
 
 ## Testing approach
 
@@ -352,11 +385,11 @@ real callbacks with the socket, threads, sleeps and REST call faked
 (`_BinanceHarness` in `tests/test_orderbook_feeds.py`,
 `tests/test_exchange_feeds.py`) -- that harness is the pattern for the rest.
 
-`REVIEW_FINDINGS.md` holds the 2026-11-07 full review: what was fixed, what
-was left as a recommendation (shared `config` mutated across Streamlit
-sessions, backtest sample overlap, weighting against 0.5 rather than the base
-rate, and more), and the evidence for each. `review/` has the scripts behind
-the quantified claims.
+`REVIEW_FINDINGS.md` holds the 2026-11-07 full review and its follow-up: what
+was fixed (including the shared-config, log-per-rerun, sample-overlap,
+base-rate and settlement-averaging items, addressed in the follow-up), what is
+still only a recommendation, and the evidence for each. `review/` has the
+scripts behind the quantified claims.
 
 Streamlit renders `$...$` as LaTeX, so every string with dollar amounts that
 reaches `st.caption`/`st.markdown`/`st.warning` must go through `_esc()` --

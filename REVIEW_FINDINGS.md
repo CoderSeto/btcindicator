@@ -3,9 +3,15 @@
 This review follows `CODE_REVIEW.md`. It started from `978c6c0`, a fast-forward of
 `claude/dreamy-pascal-8u88jt`, which is where `CODE_REVIEW.md` lives.
 
-**Tests:** 391 passed before the review and 420 pass after it. The suite also passes under
+**Tests:** 391 passed before the review and 420 after it. The suite also passes under
 `pytest-randomly` with seeds 1, 2 and 3, in reverse file order, and on two consecutive runs. I
 found no order dependence.
+
+**Follow-up pass (same day):** the review's three recommended next steps are done, in four
+commits. **D1** and **D6** (shared config, a log row per rerun), **D2** and **D3** (overstated n,
+edge against 50%), and **D4** (the Kalshi model ignored the settlement average, and calibration
+scored the closest-to-close row) are all addressed. 459 tests pass. The rows below say what changed;
+the verdict is updated to match.
 
 ## Verdict
 
@@ -20,14 +26,16 @@ output. The worst problems were in the numbers people act on:
   "held" persistence and wall age across outages. Wall tracking merged every wall on a side into
   one, so a brand-new wall could pass the anti-spoof age filter. All fixed.
 
-After the fixes, the Kalshi P(YES) is a reasonable rough reference until the last ~2 minutes. From
-there it is systematically too close to 50%, often by 10+ points (finding D4 has the
-recommendation).
+The Kalshi P(YES) now prices the 60-second settlement average and matches a Monte Carlo of the
+real rule to within 0.001 from 14 minutes down to 1 (it was 13 points off at 1 minute). It is
+still a driftless-GBM model fed Coinbase prices, and inside the final minute it assumes the
+already-taken prints equal the current price. The page flags that minute.
 
-**The backtest hit rates and the "weighted conviction" built on them are mostly noise at the sample
-sizes they report.** Each stated sample is worth about 1/3 of an independent one. On a pure random
-walk, the weights still move by ±0.08–0.16 (2 sd). Don't read a 52% bucket or a 1.1 weight as an
-edge.
+**The backtest no longer overstates its evidence.** Every hit rate is shown next to its base rate
+and its overlap-corrected effective sample size, and small-sample flags use the effective size. A
+weight only leaves 1.0 when the edge over the base rate clears 2 standard errors; on random walks
+that happened in 0–4% of runs, against ±0.08–0.16 of pure noise before. Expect most weights to read
+1.00, which is the honest answer at these sample sizes.
 
 ## Findings
 
@@ -38,7 +46,7 @@ fix. Every fixed item is its own commit, named in the Evidence column.
 |----|----------|------|----------|---------|----------|
 | B1 | **Critical** | Confirmed bug, fixed | `app.py:267` | On ETH-USD, SOL-USD and BTC-EUR, auto-track still fetched KXBTC15M. It priced the ~$75k BTC strike against that pair's candles: ~0% on ETH, an FX-shifted value on BTC-EUR. The result showed as "Kalshi P(YES)" and was logged under the BTC ticker. | `test_app.py::test_kalshi_auto_track_only_follows_the_btc_contract_on_btc_usd`; commit `8fc4817` |
 | B2 | **High** | Confirmed bug, fixed | `app.py:296` | A strike edited by hand stays in place on purpose, but each row was still logged under the live market's ticker. The calibration report then scored a P(YES) for one strike against the settlement of another. | `test_app.py::test_manually_edited_strike_is_never_logged_under_the_live_ticker` (before the fix the log held `[75743.66, 75000.0, 75000.0]`); `97a592d` |
-| B3 | **High** | Confirmed bug, fixed | `kalshi.py:24`, `app.py:673`, README, CLI | The settlement-averaging caveat had the direction backwards. Averaging the last 60s **lowers** terminal variance, so the true probability is *more* extreme than the model. Example: 1 min left, spot 5bp above strike, model 79% vs averaged settlement ~92%. Anyone following the caveat would adjust the wrong way. | `test_kalshi.py::test_settlement_averaging_makes_the_true_probability_more_extreme` (independent Monte Carlo); `test_app.py::test_settlement_averaging_caveat_states_the_right_direction`; `python review/settlement_averaging.py`; `b8a04e1` |
+| B3 | **High** | Confirmed bug, fixed | `kalshi.py:24`, `app.py:673`, README, CLI | The settlement-averaging caveat had the direction backwards. Averaging the last 60s **lowers** terminal variance, so the true probability is *more* extreme than the model. Example: 1 min left, spot 5bp above strike, model 79% vs averaged settlement ~92%. Anyone following the caveat would adjust the wrong way. (The follow-up then modelled the average itself; see D4.) | `test_kalshi.py::test_settlement_averaging_makes_the_true_probability_more_extreme` (independent Monte Carlo); `python review/settlement_averaging.py`; `b8a04e1` |
 | B4 | **High** | Confirmed bug, fixed | `orderbook_feeds.py:544` (`_flow`) | Flow divided summed notional over whichever venues were usable at each end of the window. When a bid-heavy venue left the aggregate (a disconnect, or the spread gate during volatility), the result was **−0.69, a bearish flow vote that nobody placed** (threshold 0.20). | `test_orderbook_feeds.py::test_flow_ignores_a_venue_leaving_the_aggregate`; `f64490b` |
 | B5 | **High** | Confirmed bug, fixed | `orderbook_feeds.py:478` (`_track_walls`) | The wall key was `round(price / (price*bps/1e4))`, which is a constant. Every wall on a venue's side merged into one entry, so only one was ever listed. A new wall 80bp away inherited the old wall's age and showed as "held 31s", which defeats the spoof filter that wall age exists for. | `test_walls_at_different_prices_are_tracked_separately`, `test_a_new_wall_at_another_price_does_not_inherit_an_old_walls_age`; `9545b27` |
 | B6 | Medium | Confirmed bug, fixed | `kalshi.py:57` | Realized vol treated every candle as one minute. With `GRANULARITY` set to anything but 60, vol and P(YES) were wrong; 5-min candles gave √5 ≈ 2.24× the vol. Correct at the default of 60. | `test_kalshi.py::test_realized_vol_annualizes_by_the_candle_size_not_by_minutes`, `test_app.py::test_fair_value_uses_the_configured_candle_size`; `0190517` |
@@ -52,12 +60,12 @@ fix. Every fixed item is its own commit, named in the Evidence column.
 | B14 | Nit | Confirmed bug, fixed | `kalshi.py:125` | An expired exact tie returned 0.5. The contract is `greater_or_equal`, so a tie settles YES. This changed a previously pinned assertion. | `test_kalshi.py::test_crossing_expired_is_decided_by_price`; `1e4ecfa` |
 | B15 | Nit | Confirmed bug, fixed | `kalshi_tracking.py:159` | `3*0.2 == 0.6000000000000001`, so p=0.6 landed in the 40–60% bucket. | `test_a_prediction_exactly_on_a_bucket_edge_lands_in_the_upper_bucket`; `55af275` |
 | B16 | Nit | Confirmed bug, fixed | `kalshi_tracking.py:221` | A blank ticker cell became the string `"nan"`, was counted as a contract, and was queried as `GET /markets/nan` on every run. | `test_report_does_not_query_kalshi_for_a_blank_ticker`; `0bc5412` |
-| D1 | Medium | Design concern | `app.py:139-141` | `app.py` writes the sidebar values into the shared `config` module. A new browser session opens with the previous session's pair and alert threshold. Two concurrent sessions can render or log one pair's data under the other's label. The existing tests pin this ("the shared config follows"), so I left it unfixed. | `python -m pytest -q -s review/demo_cross_session.py -k one_session` → "session B opened with pair = ETH-USD \| alert threshold = 7" |
-| D2 | Medium | Design concern (quantified, known item 7) | `backtest.py:120` | Overlapping 5-candle outcomes, plus state votes that persist for many candles, mean the stated `n` overstates the evidence. Over 80 independent 4000-candle random walks with **no edge**, the median design effect is **2.8**, and **3.4–3.7 for SMA/EMA/MACD**: n≈1980 behaves like ≈570, with sd 2.1% rather than 1.1%. A 52% bucket at n≈2000 looks like z≈1.8 at face value and is really ≈1.0. `BACKTEST_MIN_SAMPLE` is applied to the inflated n. | `python review/backtest_overlap.py 80` |
-| D3 | Medium | Design concern | `weighting.py:35` | Edge is measured against 0.5, not against the base rate for that direction in the backtested window. In a window that drifted +5% over 4000 one-minute candles, P(up over 5 candles) ≈ 52%, so a no-skill "always bullish" indicator gets weight ≈1.04 and "always bearish" ≈0.96. Sampling noise (D2) is larger still: with no edge at all, the weights spread ±0.08 (2 sd) for the cross signals and ±0.16 for RSI. Weighted conviction mostly reflects window drift and noise. | Arithmetic here; noise from the D2 run (obs sd × `INDICATOR_WEIGHT_SCALE`) |
-| D4 | Medium | Design concern | `kalshi.py` (model), `kalshi_tracking.py:146` | (a) The model ignores the 60s averaging. The error is under 1pt at 14 min, 1–2pt at 5 min, 3–4pt at 2 min and up to 13pt at 1 min (table from `review/settlement_averaging.py`). Using variance σ²(T−⅔ min) for T ≥ 1 min would close most of it. (b) Calibration keeps the row *closest to close*, where outcomes are nearly decided and the averaging error is largest, so it measures the model where it matters least. Prefer the row nearest a fixed horizon, e.g. 5 min left. | `python review/settlement_averaging.py` |
+| D1 | Medium | Design concern, **addressed** | `app.py:39` | `app.py` wrote the sidebar values into the shared `config` module. A new browser session opened with the previous session's pair and alert threshold, and two concurrent sessions could render or log one pair's data under the other's label. *Now:* each run works on a private copy of config.py's settings. The two tests that pinned the old behaviour assert the opposite. | `test_app.py::test_one_session_does_not_change_another_sessions_defaults` (the old demo printed "session B opened with pair = ETH-USD \| alert threshold = 7"); `457ec5b` |
+| D2 | Medium | Design concern (known item 7), **addressed** | `backtest.py` (`effective_sample_size`) | Overlapping 5-candle outcomes, plus state votes that persist for many candles, meant the stated `n` overstated the evidence. Over 80 independent 4000-candle random walks with **no edge**, the median design effect was **2.8**, and **3.4–3.7 for SMA/EMA/MACD**: n≈1980 behaved like ≈570. *Now:* every bucket carries `n_eff`, a covariance-corrected effective size, exact under the no-edge null. Small-sample flags use it and the outlook quotes it. On the same 80 walks it tracks the empirical effective n: SMA bullish 568 vs 572, RSI bullish 169 vs 167, volume bullish 126 vs 122. | `test_backtest.py` (`n_eff` tests); `python review/backtest_overlap.py 80` (the `n_eff est` column); `a13bd89` |
+| D3 | Medium | Design concern, **addressed** | `weighting.py` (`weight_details`) | Edge was measured against 0.5, not against the base rate for that direction in the backtested window. A no-skill "always bullish" call in a window drifting +5% would get ≈1.04. Sampling noise was larger still: with no edge at all, weights spread ±0.08 (2 sd) for the cross signals and ±0.16 for RSI. *Now:* edge = hit rate − that direction's base rate (agg_delta uses its own window's). A weight stays 1.0 unless the edge is ≥ `INDICATOR_WEIGHT_MIN_Z` (2) standard errors on `n_eff`. On the random walks, weights left 1.0 in 0–4% of runs. The weights table explains each weight, and the outlook says weighting changes nothing when no vote has a measured edge. | `test_weighting.py` (base-rate and noise-gate tests); `review/backtest_overlap.py` (the `weights != 1` column); `a13bd89` |
+| D4 | Medium | Design concern, **addressed** | `kalshi.py` (`settlement_probability`), `kalshi_tracking.py` | (a) The model ignored the 60s averaging: under 1pt off at 14 min, 1–2pt at 5 min, 3–4pt at 2 min and up to 13pt at 1 min. *Now:* P(YES) prices the average, using the exact variance of the remaining prints. It matches a Monte Carlo of the rule to within 0.001 at 14, 5, 2 and 1 min. The point-in-time N(d2) is logged alongside as `p_yes_point`. In the final minute, prints already taken are assumed equal to spot; the output and the page say so. (b) Calibration scored the row *closest to close*, which is nearly decided. *Now:* it scores the row nearest 5 ± 1 min before close, and scores `p_yes_point` on the same rows for comparison. | `test_kalshi.py::test_settlement_probability_matches_monte_carlo_of_the_real_rule`, `test_kalshi_tracking.py::test_calibration_at_a_fixed_horizon_uses_the_row_nearest_it`; `python review/settlement_averaging.py`; `914f05e` |
 | D5 | Medium | Hypothesis | `data_fetch.py:26`, `signals.py:216` | The live path evaluates the newest Coinbase candle, which I believe is still forming (partial volume, partial close). The backtest scores completed candles. The volume-spike vote is most affected, since a partial candle rarely reaches 2× average volume. The hit rates may therefore describe a slightly different signal from the live one. | Not verifiable here (Coinbase is blocked by the proxy). Check by comparing the last candle across two calls 10s apart. |
-| D6 | Low | Design concern | `app.py:249-252` | The alert and signal logs append on **every** Streamlit rerun: each 5s refresh, each widget click, each open tab. That produces duplicate alert rows while a condition holds, and inflates the n that `analyze_correlation.py` reports. | Code reading; `test_app.py::test_alert_threshold_controls_alerting_and_the_alert_log` shows a row per run |
+| D6 | Low | Design concern, **addressed** | `main.py` (`_is_repeat`) | The alert and signal logs appended on **every** Streamlit rerun: each 5s refresh, each widget click, each open tab. That duplicated alert rows while a condition held and inflated the n `analyze_correlation.py` reports. *Now:* a repeat of the log's last alert within `LOG_MIN_INTERVAL_SECONDS` (20s) is skipped, and the signal log takes at most one row per interval. A *different* alert is always written. The check reads the file's own last row, so it holds across tabs and the console bot. | `test_log_schema.py` (duplicate-suppression tests), `test_app.py::test_reruns_from_clicks_do_not_duplicate_log_rows`; `bb6dfd2` |
 | D7 | Low | Design concern | `csv_utils.py:7` | With concurrent writers (dashboard plus console, or two tabs), both can see "needs header" and both write one. `pd.read_csv` then turns every numeric column into strings. `os.rename` can also race. | `python review/demo_csv_race.py` → "price dtype: str \| rows: 3 (2 real rows written)" |
 | D8 | Low | Design concern | `backtest_agg_delta.py:145,186` | `candle_times` are candle **open** times, but the outcome is measured from `close[i]`, 60s later. The replayed agg_delta is therefore one candle staler than the live reading. This is not look-ahead; it biases the agg_delta hit rate (likely downward). | Code reading |
 | D9 | Low | Design concern | `exchange_feeds.py:301,330` | `TradeAggregator` keeps trades in arrival order but prunes by exchange timestamp, stopping at the first unexpired trade. `snapshot()` prunes against the local clock. If venue latency differs, stale trades can linger. If the local clock skews by more than 60s, agg_delta empties or freezes. | Code reading |
@@ -131,9 +139,10 @@ commit was checked in a clean worktree with the full suite.
 ## Re-running the evidence
 
 ```bash
-python -m pytest -q                                              # 420 passed
-python review/settlement_averaging.py                            # B3 / D4 table
-python review/backtest_overlap.py 80                             # D2 / D3 (~3.5 min)
-python review/demo_csv_race.py                                   # D7
-python -m pytest -q -s review/demo_cross_session.py -k one_session   # D1
+python -m pytest -q                                              # 459 passed
+python review/settlement_averaging.py                            # B3 / D4: point vs averaged vs Monte Carlo
+python review/backtest_overlap.py 80                             # D2 / D3: n_eff and noise gate (~4 min)
+python review/demo_csv_race.py                                   # D7 (still open)
 ```
+
+D1 and D6 are now ordinary tests in `tests/test_app.py` and `tests/test_log_schema.py`.
