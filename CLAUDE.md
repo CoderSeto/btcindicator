@@ -410,12 +410,15 @@ imported. `exchange_feeds.py`'s parsers and `TradeAggregator` are covered in
 Bybit payloads come verbatim from their docs' GitHub sources, Binance futures
 from its official SDK's fixture, and Coinbase's `match` schema and meaning from
 its official client -- re-verify that one against the live docs when you can).
-Not covered: the Coinbase and Bybit runner callbacks, and visual layout/CSS,
-which needs a browser. The Binance.US depth runner's
-resync logic and `run_with_reconnect`'s backoff *are* covered, by driving the
-real callbacks with the socket, threads, sleeps and REST call faked
-(`_BinanceHarness` in `tests/test_orderbook_feeds.py`,
-`tests/test_exchange_feeds.py`) -- that harness is the pattern for the rest.
+Every WebSocket runner's callbacks are covered too, by driving the real
+closures with the socket, threads, sleeps and REST call faked: the five trade
+and liquidation runners and the Coinbase and Bybit depth runners in
+`tests/test_feed_runners.py` (what each subscribes to, and what every kind of
+message, error and close does to the aggregator), the Binance.US depth
+runner's resync in `tests/test_orderbook_feeds.py` (`_BinanceHarness`), and
+`run_with_reconnect`'s backoff in `tests/test_exchange_feeds.py`. Not covered:
+visual layout/CSS, which needs a browser, and the feeds against the live
+exchanges, which no test here reaches.
 
 `REVIEW_FINDINGS.md` holds the 2026-11-07 full review and its follow-up: what
 was fixed (including the shared-config, log-per-rerun, sample-overlap,

@@ -16,7 +16,7 @@ CSV logs, is fixed too, and re-measured as worse than first reported.
 **Second follow-up:** five more items are done: T1 (feed-parser tests), known item 2
 (configured column names), D5 (forming candle), D10 (Kalshi poll) and D16 (deprecated API).
 Testing the parsers turned up **B17**, a real bug: Coinbase trades were counted backwards in the
-live agg_delta. 494 tests pass. The rows below say what changed; the verdict is updated to match.
+live agg_delta. T2 (runner-callback tests) is closed too. 508 tests pass. The rows below say what changed; the verdict is updated to match.
 
 ## Verdict
 
@@ -87,7 +87,7 @@ fix. Every fixed item is its own commit, named in the Evidence column.
 | D15 | Nit | Design concern | `signals.py:177` | `imbalance or 0.0` turns "never computed" into a neutral vote. No current caller reaches it, but it contradicts "absent, not neutral". | Code reading |
 | D16 | Low | Design concern (known item 5), **partly addressed** | `requirements.txt`, `app.py` | The 9 `use_container_width` uses are now `width="stretch"`. Inspecting the published wheels, all three affected APIs accept it from Streamlit **1.51.0**, so the floor is now `streamlit>=1.51`; the dashboard tests pass on 1.51.0 exactly, and a test fails on any Streamlit deprecation warning. *Still open:* every dependency is `>=` with no lock file. | `test_app.py::test_the_page_uses_no_deprecated_streamlit_apis`; `500aa01` |
 | T1 | Medium | Test gap, **closed** — and it hid a bug (B17) | `exchange_feeds.py` | The trade/liquidation parsers and `TradeAggregator` had no tests, including the Binance/Bybit `S` inversion in gotcha #3. They're now tested against each exchange's own published payloads. The docs sites were unreachable, so Binance and Bybit payloads come verbatim from their docs' GitHub sources, and Binance futures from its official SDK; each is pinned by commit. | `tests/test_exchange_feeds.py`; `4e70996` |
-| T2 | Low | Test gap | `orderbook_feeds.py`, `exchange_feeds.py` | The Coinbase and Bybit runner callbacks are untested. `_BinanceHarness` in `tests/test_orderbook_feeds.py` shows how to cover them without a socket. | — |
+| T2 | Low | Test gap, **closed** | `orderbook_feeds.py`, `exchange_feeds.py` | The Coinbase and Bybit runner callbacks were untested, and so were the Binance.US trade and Binance liquidation runners. *Now:* `tests/test_feed_runners.py` drives every runner's real callbacks with a fake socket. It checks what each subscribes to and on which URL (including gotcha #4's `level2_batch`), and what each message type, error and close does: trades counted on the taker side, the liquidation symbol filter, books built from the snapshot and patched by updates, discarded on close, and overwritten on Bybit's `u`=1 restart. The Bybit delta is the docs example verbatim. Five deliberate code mutations are each caught by a test; no new bug turned up. | `tests/test_feed_runners.py` |
 
 **Ruled out (checked, not a problem):**
 
@@ -149,7 +149,7 @@ commit was checked in a clean worktree with the full suite.
 ## Re-running the evidence
 
 ```bash
-python -m pytest -q                                              # 494 passed
+python -m pytest -q                                              # 508 passed
 python review/settlement_averaging.py                            # B3 / D4: point vs averaged vs Monte Carlo
 python review/backtest_overlap.py 80                             # D2 / D3: n_eff and noise gate (~4 min)
 python review/csv_writer_race.py                                 # D7: unlocked vs append_row, 8 writers
