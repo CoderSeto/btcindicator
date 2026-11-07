@@ -437,14 +437,28 @@ def test_changing_the_pair_refetches_for_that_pair(env):
     no_exception(at)
     assert env.candle_requests[-1] == "ETH-USD"
     assert any("ETH-USD" in m.value for m in at.markdown)
-    assert cfg.PRODUCT_ID == "ETH-USD"                                     # and the shared config follows
+    assert cfg.PRODUCT_ID == "BTC-USD"                                     # the shared module is untouched
 
 
-def test_refresh_interval_flows_into_the_shared_config(env):
+def test_refresh_interval_applies_to_this_session_only(env):
     at = run()
     slider(at, "Refresh interval").set_value(45).run()
-    assert cfg.POLL_INTERVAL == 45
     assert any("refresh 45s" in m.value for m in at.markdown)
+    assert cfg.POLL_INTERVAL == 30                                         # config.py default, unchanged
+
+
+def test_one_session_does_not_change_another_sessions_defaults(env):
+    # app.py used to write the sidebar values into the shared `config` module, so a new tab opened
+    # on the previous tab's pair and threshold -- and two live tabs could render or log one pair's
+    # data under the other's label mid-run.
+    a = run()
+    a.sidebar.selectbox[0].select("ETH-USD").run()
+    slider(a, "Alert threshold").set_value(7).run()
+    b = run()
+    no_exception(b)
+    assert b.sidebar.selectbox[0].value == "BTC-USD"
+    assert slider(b, "Alert threshold").value == cfg.COMPOSITE_ALERT_THRESHOLD
+    assert a.sidebar.selectbox[0].value == "ETH-USD"                      # A keeps its own choice
 
 
 # ---------- backtest sidebar ----------

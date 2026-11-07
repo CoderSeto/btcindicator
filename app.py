@@ -10,13 +10,14 @@ This is a monitoring/alerting tool -- it does NOT place any trades.
 """
 import os
 from datetime import datetime
+from types import SimpleNamespace
 
 import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 import backtest
-import config as cfg
+import config as shared_config
 import exchange_feeds
 import kalshi
 import kalshi_api
@@ -28,6 +29,14 @@ from dashboard_data import load_state
 from main import log_alert, log_signal_snapshot
 
 st.set_page_config(page_title="BTC Indicator Bot", page_icon="\u20bf", layout="wide")
+
+# A private copy of config.py's settings for this run. Streamlit runs every
+# browser session's script in the same process, so writing the sidebar values
+# into the shared `config` module (as this page once did) made a new tab open
+# on the previous tab's pair and threshold, and let two live tabs render or log
+# one pair's data under the other's label mid-run. Everything below reads and
+# writes `cfg`; the shared module is only ever read, here.
+cfg = SimpleNamespace(**{k: getattr(shared_config, k) for k in dir(shared_config) if k.isupper()})
 
 PAIRS = ["BTC-USD", "ETH-USD", "SOL-USD", "BTC-EUR"]
 
@@ -134,8 +143,9 @@ st.sidebar.button("Refresh now", use_container_width=True)
 st.sidebar.caption("Changes here apply immediately. Edit config.py to change other defaults "
                     "(indicator periods, order book depth, etc).")
 
-# These are shared module-level values, so this also updates what main.py's
-# log_alert() and the indicator/signal functions see.
+# This session's copy only (see the top of the file). Everything this page
+# calls is handed `cfg` explicitly; main.py's loggers read only the shared log
+# paths, which the sidebar never changes.
 cfg.PRODUCT_ID = product_id
 cfg.POLL_INTERVAL = refresh_seconds
 cfg.COMPOSITE_ALERT_THRESHOLD = alert_threshold
