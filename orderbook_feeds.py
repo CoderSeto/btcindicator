@@ -434,6 +434,12 @@ class BookAggregator:
             "ask_notional": aggregate["ask_notional"],
             "agreement": aggregate["agreement"],
             "venue_count": aggregate["venue_count"],
+            # Per-venue in-band notional, so flow can compare the same venues at
+            # both ends of its window (see _flow).
+            "venue_notional": {
+                venue: (m["bid_notional"], m["ask_notional"])
+                for venue, m in aggregate["venues"].items()
+            },
         }
 
         with self._lock:
@@ -572,12 +578,27 @@ class BookAggregator:
             return {"available": False,
                     "reason": f"only {elapsed:.0f}s of book history, need {window:.0f}s"}
 
-        if min(past["bid_notional"], past["ask_notional"],
-               now["bid_notional"], now["ask_notional"]) <= 0:
+        # Only venues in the aggregate at BOTH ends count. Summing whatever was
+        # usable at each end turns a venue dropping out (a disconnect, or the
+        # spread gate during volatility) into "liquidity pulled" on whichever
+        # side that venue was heavier on.
+        past_bid, past_ask = past["bid_notional"], past["ask_notional"]
+        now_bid, now_ask = now["bid_notional"], now["ask_notional"]
+        if "venue_notional" in past and "venue_notional" in now:
+            common = sorted(set(past["venue_notional"]) & set(now["venue_notional"]))
+            if not common:
+                return {"available": False,
+                        "reason": "no venue was in the aggregate at both ends of the window"}
+            past_bid = sum(past["venue_notional"][v][0] for v in common)
+            past_ask = sum(past["venue_notional"][v][1] for v in common)
+            now_bid = sum(now["venue_notional"][v][0] for v in common)
+            now_ask = sum(now["venue_notional"][v][1] for v in common)
+
+        if min(past_bid, past_ask, now_bid, now_ask) <= 0:
             return {"available": False, "reason": "a side of the book was empty in the window"}
 
-        bid_ratio = now["bid_notional"] / past["bid_notional"]
-        ask_ratio = now["ask_notional"] / past["ask_notional"]
+        bid_ratio = now_bid / past_bid
+        ask_ratio = now_ask / past_ask
         value = math.log(bid_ratio) - math.log(ask_ratio)
 
         return {

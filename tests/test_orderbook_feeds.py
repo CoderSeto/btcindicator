@@ -529,3 +529,40 @@ def _clocked(monkeypatch, start=1_000_000.0):
     clock = {"t": start}
     monkeypatch.setattr(obf, "time", SimpleNamespace(time=lambda: clock["t"], sleep=lambda s: None))
     return clock
+
+
+def test_flow_ignores_a_venue_leaving_the_aggregate(monkeypatch):
+    """
+    The flow numerator/denominator were the *summed* notional of whichever venues were usable at
+    each end of the window. A bid-heavy venue dropping out (disconnect, or the spread gate during
+    volatility) then reads as resting bids being pulled -- a book_flow vote nobody placed. Flow
+    must compare like with like: only venues present at both ends.
+    """
+    clock = _clocked(monkeypatch)
+    agg = obf.BookAggregator(_Cfg)
+    agg.apply_snapshot("coinbase", [["99999", "10"]], [["100001", "10"]])  # balanced, unchanged
+    agg.apply_snapshot("bybit", [["99998", "30"]], [["100002", "10"]])     # bid-heavy
+    assert agg.sample()["venue_count"] == 2
+    clock["t"] += 61.0
+    agg.reset_book("bybit")                                                  # bybit drops out
+    assert agg.sample()["venue_count"] == 1
+
+    flow = agg.snapshot()["flow"]
+    # The old code reported log(10/40) - log(10/20) = -0.69: a strong "bearish" flow.
+    assert flow["available"] is True
+    assert flow["value"] == pytest.approx(0.0, abs=1e-12)
+    assert flow["bid_change_pct"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_flow_is_unavailable_when_no_venue_spans_the_window(monkeypatch):
+    clock = _clocked(monkeypatch)
+    agg = obf.BookAggregator(_Cfg)
+    agg.apply_snapshot("bybit", [["99998", "30"]], [["100002", "10"]])
+    agg.sample()
+    clock["t"] += 61.0
+    agg.reset_book("bybit")
+    agg.apply_snapshot("coinbase", [["99999", "10"]], [["100001", "10"]])
+    agg.sample()
+    flow = agg.snapshot()["flow"]
+    assert flow["available"] is False
+    assert "venue" in flow["reason"]
