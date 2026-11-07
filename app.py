@@ -287,7 +287,7 @@ kalshi_pair_ok = product_id == KALSHI_PAIR
 
 kalshi_live = None
 if auto_track and kalshi_pair_ok:
-    kalshi_live = kalshi_api.current_btc15m_market()
+    kalshi_live = kalshi_api.cached_btc15m_market(cfg.KALSHI_POLL_SECONDS)
     if kalshi_live["available"]:
         # Strike only resets when the window itself actually changes -- so a
         # manual edit mid-window survives instead of being fought every

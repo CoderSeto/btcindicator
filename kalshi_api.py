@@ -19,6 +19,7 @@ needs a live sanity check. Run standalone to do that:
 
     python kalshi_api.py
 """
+import threading
 from datetime import datetime, timezone
 
 import requests
@@ -112,6 +113,50 @@ def current_btc15m_market() -> dict:
         return {"available": False, "reason": "No open KXBTC15M market found right now."}
 
     return parse_market(markets[0])
+
+
+def _now() -> datetime:
+    """The poll cache's clock (a function so tests can move it)."""
+    return datetime.now(timezone.utc)
+
+
+# One process-wide cache: Streamlit runs every browser tab in the same process,
+# so this caps the whole dashboard at one Kalshi request per max_age, not one
+# per tab per rerun.
+_poll_cache = {"at": None, "result": None}
+_poll_lock = threading.Lock()
+
+
+def cached_btc15m_market(max_age_seconds: float) -> dict:
+    """
+    current_btc15m_market(), fetched at most once per `max_age_seconds`
+    across the process. The dashboard used to poll on every rerun of every
+    tab -- 12 requests a minute per tab at a 5s refresh -- and Kalshi has
+    answered HTTP 429 before.
+
+    `minutes_remaining` is recomputed from the clock on every call, so the
+    countdown never freezes on a cached value. A cached market whose close
+    time has passed is refetched straight away (the next window has opened),
+    whatever its age. Failures are cached too, so a rate-limit response
+    isn't answered with an immediate retry. max_age_seconds <= 0 disables
+    the cache.
+    """
+    now = _now()
+    with _poll_lock:
+        at, result = _poll_cache["at"], _poll_cache["result"]
+        fresh = (
+            at is not None
+            and max_age_seconds > 0
+            and 0 <= (now - at).total_seconds() < max_age_seconds
+            and not (result.get("available") and result["close_time"] <= now)
+        )
+        if not fresh:
+            result = current_btc15m_market()
+            _poll_cache["at"], _poll_cache["result"] = now, result
+    out = dict(result)
+    if out.get("available"):
+        out["minutes_remaining"] = max(0.0, (out["close_time"] - now).total_seconds() / 60.0)
+    return out
 
 
 if __name__ == "__main__":

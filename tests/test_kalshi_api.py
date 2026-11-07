@@ -293,3 +293,58 @@ def test_a_close_time_without_a_timezone_is_read_as_utc_not_a_crash():
     assert parsed["available"] is True
     assert parsed["minutes_remaining"] == pytest.approx(7.5)
     assert parsed["close_time"].tzinfo is not None
+
+
+# ---------- the shared poll cache (REVIEW_FINDINGS D10) ----------
+#
+# The dashboard polled Kalshi on every rerun of every tab (12 requests a minute per tab at a 5s
+# refresh), and Kalshi has answered 429 before. cached_btc15m_market() fetches at most once per
+# max_age across the whole process, but recomputes minutes_remaining from the clock on every call,
+# so the countdown never freezes on a cached value.
+
+@pytest.fixture
+def poll(monkeypatch):
+    from datetime import timedelta
+    state = {"calls": 0, "result": kalshi_api.parse_market(OPEN_MARKET, now=NOW), "now": NOW}
+
+    def fetch():
+        state["calls"] += 1
+        return state["result"]
+    monkeypatch.setattr(kalshi_api, "current_btc15m_market", fetch)
+    monkeypatch.setattr(kalshi_api, "_now", lambda: state["now"])
+    monkeypatch.setattr(kalshi_api, "_poll_cache", {"at": None, "result": None})
+    state["advance"] = lambda s: state.__setitem__("now", state["now"] + timedelta(seconds=s))
+    return state
+
+
+def test_poll_is_shared_within_max_age_but_the_countdown_keeps_moving(poll):
+    assert kalshi_api.cached_btc15m_market(10)["minutes_remaining"] == pytest.approx(7.5)
+    poll["advance"](6)
+    again = kalshi_api.cached_btc15m_market(10)
+    assert poll["calls"] == 1                                              # served from the cache
+    assert again["minutes_remaining"] == pytest.approx(7.4)                # but 6s later on the clock
+    poll["advance"](5)                                                     # 11s after the fetch
+    kalshi_api.cached_btc15m_market(10)
+    assert poll["calls"] == 2
+
+
+def test_poll_refetches_once_the_cached_window_has_closed(poll):
+    kalshi_api.cached_btc15m_market(600)
+    poll["advance"](7.5 * 60)                                              # exactly at close
+    kalshi_api.cached_btc15m_market(600)
+    assert poll["calls"] == 2                                              # the next window, not a stale 0:00
+
+
+def test_poll_caches_failures_too_so_a_429_is_not_hammered(poll):
+    poll["result"] = {"available": False, "reason": "Couldn't reach Kalshi's API: 429"}
+    kalshi_api.cached_btc15m_market(10)
+    poll["advance"](3)
+    out = kalshi_api.cached_btc15m_market(10)
+    assert poll["calls"] == 1 and out["available"] is False
+
+
+def test_poll_max_age_zero_always_fetches_and_callers_cannot_mutate_the_cache(poll):
+    first = kalshi_api.cached_btc15m_market(0)
+    first["strike"] = -1.0
+    second = kalshi_api.cached_btc15m_market(0)
+    assert poll["calls"] == 2 and second["strike"] == 75_743.66

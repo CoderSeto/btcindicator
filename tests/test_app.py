@@ -122,6 +122,11 @@ def env(monkeypatch, tmp_path):
         e.kalshi_calls += 1
         return e.kalshi
     monkeypatch.setattr(kalshi_api, "current_btc15m_market", current)
+    # The page polls through kalshi_api.cached_btc15m_market: run it on the fixtures' clock, with a
+    # fresh cache, and with caching off so each run sees env.kalshi (the cache has its own tests).
+    monkeypatch.setattr(kalshi_api, "_now", lambda: NOW)
+    monkeypatch.setattr(kalshi_api, "_poll_cache", {"at": None, "result": None})
+    monkeypatch.setattr(cfg, "KALSHI_POLL_SECONDS", 0)
 
     class Handle:
         def __init__(self, which):
@@ -803,3 +808,13 @@ def test_header_and_kalshi_use_the_live_price_while_signals_wait_for_the_candle_
     no_exception(at)
     assert metric(at, "BTC-USD").value == f"${df['close'].iloc[-1]:,.2f}"
     assert f"${df['close'].iloc[-1]:,.2f} vs" in all_text(at).replace("\\$", "$")   # Kalshi caption
+
+
+
+def test_reruns_share_one_kalshi_poll_within_the_poll_interval(env):
+    cfg.KALSHI_POLL_SECONDS = 10
+    at = run()
+    at.run()
+    at.sidebar.button[0].click().run()                                     # "Refresh now"
+    assert env.kalshi_calls == 1
+    assert at.number_input(key="kalshi_minutes").value == 7.5              # countdown from the clock

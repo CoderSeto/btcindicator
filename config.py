@@ -224,6 +224,11 @@ AGG_DELTA_BACKTEST_MAX_REQUESTS = 300
 # regime change; shorter = more responsive but noisier. 120 (2 hours) is
 # a reasonable middle ground for a contract this short-dated.
 KALSHI_VOL_LOOKBACK_MINUTES = 120
+# The dashboard asks Kalshi for the open KXBTC15M market at most once per
+# this many seconds, shared across every open tab (the countdown is still
+# recomputed on every refresh). Kalshi has answered HTTP 429 to per-refresh
+# polling before. 0 polls on every refresh.
+KALSHI_POLL_SECONDS = 10
 
 # --- Kalshi prediction tracking / calibration (see kalshi_tracking.py) ---
 # When True, every fair-value computation (each dashboard refresh, while
