@@ -13,7 +13,10 @@ Sources for the payloads below:
     "How to manage a local order book correctly"
   - Bybit v5 WebSocket public orderbook docs (snapshot, delta)
 """
+import json
 import math
+import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -390,9 +393,8 @@ def _wall(price, notional=1_000_000.0, side="ask", venue="coinbase"):
 
 def test_wall_age_accumulates_across_samples():
     agg = obf.BookAggregator(_Cfg)
-    agg._track_walls([_wall(100_100.0)], now=1000.0)
-    agg._track_walls([_wall(100_100.0)], now=1010.0)
-    agg._track_walls([_wall(100_100.0)], now=1020.0)
+    for t in range(1000, 1021):                                              # sampled every second
+        agg._track_walls([_wall(100_100.0)], now=float(t))
 
     walls = agg._aged_walls(1020.0)
     assert len(walls) == 1
@@ -408,7 +410,8 @@ def test_a_wall_repriced_by_a_tick_keeps_its_age():
     """
     agg = obf.BookAggregator(_Cfg)
     agg._track_walls([_wall(100_100.0)], now=1000.0)
-    agg._track_walls([_wall(100_100.5)], now=1020.0)  # 0.05bps away
+    for t in range(1001, 1021):                                              # sampled every second
+        agg._track_walls([_wall(100_100.5)], now=float(t))                  # 0.05bps away
     walls = agg._aged_walls(1020.0)
     assert len(walls) == 1
     assert walls[0]["age_seconds"] == pytest.approx(20.0)
@@ -493,3 +496,36 @@ def test_a_stalled_sampler_is_reported_rather_than_served_as_live():
     stale = agg.snapshot()
     assert stale["available"] is False
     assert "stale" in stale["reason"]
+
+
+# --- review regressions: gaps, venue churn, Binance resync (see REVIEW_FINDINGS.md) ---
+
+def test_persistence_does_not_bridge_a_gap_in_the_history():
+    """
+    The history only gets a sample while some venue has a usable book, so an outage (every
+    venue dropped, the machine asleep) leaves a hole. A lean seen before and after the hole has
+    not been *observed* holding through it -- "time is evidence" only for time we watched.
+    """
+    agg = obf.BookAggregator(_Cfg)
+    history = _history([(0, 0.5), (1, 0.5), (2, 0.5), (300, 0.5), (301, 0.5)])
+    result = agg._persistence(history)
+    assert result["direction"] == "bullish"
+    assert result["seconds"] == pytest.approx(1.0)
+
+
+def test_wall_age_does_not_bridge_a_sampling_gap():
+    # _track_walls only runs when a sample is taken, so the grace check never saw the outage.
+    agg = obf.BookAggregator(_Cfg)
+    agg._track_walls([_wall(100_100.0)], now=1000.0)
+    agg._track_walls([_wall(100_100.0)], now=1001.0)
+    agg._track_walls([_wall(100_100.0)], now=1300.0)                        # 5 minutes unobserved
+    walls = agg._aged_walls(1300.0)
+    assert len(walls) == 1
+    assert walls[0]["age_seconds"] == pytest.approx(0.0)
+    assert walls[0]["held"] is False
+
+
+def _clocked(monkeypatch, start=1_000_000.0):
+    clock = {"t": start}
+    monkeypatch.setattr(obf, "time", SimpleNamespace(time=lambda: clock["t"], sleep=lambda s: None))
+    return clock

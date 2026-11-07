@@ -458,6 +458,13 @@ class BookAggregator:
         accumulate enough age to be reported as held.
         """
         cfg = self.cfg
+        grace = self._max_sample_gap()
+        # Expire first, against the time this sample was taken. Pruning only after
+        # updating let a wall seen on both sides of an unsampled outage carry its
+        # age straight across it.
+        for key in [k for k, e in self._walls.items() if now - e["last_seen"] > grace]:
+            del self._walls[key]
+
         seen = set()
         for wall in walls:
             bucket_size = max(wall["price"] * cfg.BOOK_WALL_MATCH_BPS / 10_000.0, 1e-9)
@@ -472,12 +479,20 @@ class BookAggregator:
 
         # A wall briefly absent from one sample (partially consumed, then
         # replenished) shouldn't lose its accumulated age, so entries are
-        # only dropped after a few samples' grace.
-        grace = max(3.0 * cfg.BOOK_SAMPLE_INTERVAL_SECONDS, 3.0)
-        for key in [k for k, e in self._walls.items() if now - e["last_seen"] > grace]:
-            del self._walls[key]
+        # only dropped after a few samples' grace -- checked above, before
+        # this sample's sightings refresh anything.
 
     # -- derived reads --
+
+    def _max_sample_gap(self) -> float:
+        """
+        The longest silence between two samples that still counts as continuous
+        observation. Samples are only taken while some venue has a usable book, so
+        a longer hole means nobody was watching -- an outage, or the machine asleep
+        -- and whatever held before it can't be credited with holding through it.
+        Same allowance the wall tracker uses for a briefly missing wall.
+        """
+        return max(3.0 * self.cfg.BOOK_SAMPLE_INTERVAL_SECONDS, 3.0)
 
     def _persistence(self, history) -> dict:
         """
@@ -501,8 +516,11 @@ class BookAggregator:
         end_ts = history[-1]["ts"]
         start_ts = end_ts
         run = []
+        max_gap = self._max_sample_gap()
         for s in reversed(history):
             v = s["imbalance"]
+            if run and start_ts - s["ts"] > max_gap:
+                break  # a hole in the history: the run can't be traced across it
             if abs(v) >= threshold and (1 if v > 0 else -1) == sign:
                 start_ts = s["ts"]
                 run.append(v)
