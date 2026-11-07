@@ -656,3 +656,11 @@ def test_settlement_averaging_caveat_states_the_right_direction(env):
     text = all_text(run())
     assert "overstates how extreme" not in text
     assert "less extreme than the true" in text
+
+
+def test_fair_value_uses_the_configured_candle_size(env, monkeypatch):
+    # With 5-minute candles the page must annualize per 5 minutes, not per minute.
+    monkeypatch.setattr(cfg, "GRANULARITY", 300)
+    at = run()
+    want = kalshi.fair_value(env.df, 75_743.66, 7.5, cfg.KALSHI_VOL_LOOKBACK_MINUTES, candle_seconds=300)
+    assert metric(at, "P(YES)").value == f"{want['p_yes'] * 100:.1f}%"

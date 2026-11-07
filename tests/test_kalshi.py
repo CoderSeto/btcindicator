@@ -232,3 +232,20 @@ def test_settlement_averaging_makes_the_true_probability_more_extreme(minutes, s
         assert model > 0.5 and true_p > model + 5 * se
     else:
         assert model < 0.5 and true_p < model - 5 * se
+
+
+def test_realized_vol_annualizes_by_the_candle_size_not_by_minutes():
+    # 5-minute candles whose log returns have a known per-candle std. Treating each one as a
+    # minute (the old behaviour) inflates annual vol by sqrt(5) ~ 2.24x, and P(YES) with it.
+    rng = np.random.default_rng(11)
+    annual = 0.45
+    per_candle = annual * math.sqrt(5 / MIN_PER_YEAR)
+    closes = 75_000 * np.exp(np.cumsum(rng.normal(0, per_candle, 400)))
+    lookback_minutes = 600                                                  # = 120 five-minute candles
+    out = kalshi.realized_volatility(_df(closes), lookback_minutes, candle_seconds=300)
+    window = closes[-(120 + 1):]
+    expected = np.std(np.diff(np.log(window)), ddof=1) * math.sqrt(MIN_PER_YEAR / 5)
+    assert out["annual_vol"] == pytest.approx(expected, rel=1e-12)
+    assert out["samples_requested"] == 120
+    fv = kalshi.fair_value(_df(closes), 75_000, 7.5, lookback_minutes, candle_seconds=300)
+    assert fv["annual_vol"] == pytest.approx(expected, rel=1e-12)

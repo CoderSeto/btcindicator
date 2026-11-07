@@ -54,10 +54,14 @@ from datetime import datetime, timezone
 import pandas as pd
 
 
-def realized_volatility(df: pd.DataFrame, lookback_minutes: int) -> dict:
+def realized_volatility(df: pd.DataFrame, lookback_minutes: int, candle_seconds: int = 60) -> dict:
     """
     Annualized realized volatility from close-to-close log returns over
-    the last `lookback_minutes` of 1-minute candle data.
+    the last `lookback_minutes` of candle data whose candles are
+    `candle_seconds` long. The candle size matters twice: it sets how many
+    candles cover the lookback, and how many such periods make a year.
+    Annualizing 5-minute returns as if they were 1-minute returns
+    overstates vol by sqrt(5).
 
     Returns {"annual_vol": float, "samples_used": int, "samples_requested": int}
     or {"annual_vol": None, "reason": str} if there isn't enough data or
@@ -66,7 +70,8 @@ def realized_volatility(df: pd.DataFrame, lookback_minutes: int) -> dict:
     data was actually available than asked for, rather than silently
     computing a shorter-than-intended window.
     """
-    recent = df.tail(lookback_minutes + 1)
+    lookback_candles = max(int(math.ceil(lookback_minutes * 60 / candle_seconds)), 1)
+    recent = df.tail(lookback_candles + 1)
     if len(recent) < 3:
         return {"annual_vol": None, "reason": "Not enough candle history to estimate volatility."}
 
@@ -82,17 +87,17 @@ def realized_volatility(df: pd.DataFrame, lookback_minutes: int) -> dict:
 
     mean_r = sum(log_returns) / samples_used
     variance = sum((r - mean_r) ** 2 for r in log_returns) / (samples_used - 1)
-    per_minute_std = math.sqrt(variance)
-    if per_minute_std <= 0:
+    per_candle_std = math.sqrt(variance)
+    if per_candle_std <= 0:
         return {"annual_vol": None, "reason": "Price didn't move at all in this window -- can't estimate volatility."}
 
-    minutes_per_year = 365.25 * 24 * 60
-    annual_vol = per_minute_std * math.sqrt(minutes_per_year)
+    candles_per_year = 365.25 * 24 * 60 * 60 / candle_seconds
+    annual_vol = per_candle_std * math.sqrt(candles_per_year)
 
     return {
         "annual_vol": annual_vol,
         "samples_used": samples_used,
-        "samples_requested": lookback_minutes,
+        "samples_requested": lookback_candles,
     }
 
 
@@ -129,7 +134,8 @@ def crossing_probability(current_price: float, strike: float, minutes_remaining:
     return _norm_cdf(d2)
 
 
-def fair_value(df: pd.DataFrame, strike: float, minutes_remaining: float, lookback_minutes: int) -> dict:
+def fair_value(df: pd.DataFrame, strike: float, minutes_remaining: float, lookback_minutes: int,
+               candle_seconds: int = 60) -> dict:
     """
     Convenience wrapper: pulls current price from the latest candle close,
     computes realized volatility over lookback_minutes, and returns the
@@ -145,7 +151,7 @@ def fair_value(df: pd.DataFrame, strike: float, minutes_remaining: float, lookba
         return {"available": False, "reason": "Strike must be a positive price."}
 
     current_price = float(df["close"].iloc[-1])
-    vol_result = realized_volatility(df, lookback_minutes)
+    vol_result = realized_volatility(df, lookback_minutes, candle_seconds)
     if vol_result["annual_vol"] is None:
         return {"available": False, "reason": vol_result["reason"]}
 
@@ -211,7 +217,7 @@ if __name__ == "__main__":
     print(f"Fetching recent {cfg.PRODUCT_ID} price history...")
     df = data_fetch.get_candles(cfg.PRODUCT_ID, cfg.GRANULARITY, max(cfg.CANDLE_HISTORY, lookback + 10))
 
-    result = fair_value(df, args.strike, minutes_remaining, lookback)
+    result = fair_value(df, args.strike, minutes_remaining, lookback, candle_seconds=cfg.GRANULARITY)
     if not result["available"]:
         print(f"[error] {result['reason']}")
     else:

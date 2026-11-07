@@ -280,7 +280,7 @@ if "kalshi_minutes" not in st.session_state:
 
 kalshi_result = kalshi.fair_value(
     df, st.session_state["kalshi_strike"], st.session_state["kalshi_minutes"],
-    cfg.KALSHI_VOL_LOOKBACK_MINUTES,
+    cfg.KALSHI_VOL_LOOKBACK_MINUTES, candle_seconds=cfg.GRANULARITY,
 )
 
 if kalshi_result["available"] and kalshi_live and kalshi_live["available"]:
