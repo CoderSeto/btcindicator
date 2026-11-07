@@ -363,6 +363,10 @@ class TradeAggregator:
 
 # --- WebSocket runners ---------------------------------------------------
 
+# A connection that lasted at least this long resets the reconnect backoff.
+_HEALTHY_CONNECTION_SECONDS = 60.0
+
+
 def run_with_reconnect(name: str, create_app_fn, stop_event: threading.Event,
                         status_sink, holder: dict):
     """
@@ -380,14 +384,24 @@ def run_with_reconnect(name: str, create_app_fn, stop_event: threading.Event,
         aggregator.set_status(name, "connecting")
         ws_app = create_app_fn()
         holder["ws"] = ws_app
+        started = time.time()
         try:
             ws_app.run_forever(ping_interval=20, ping_timeout=10)
         except Exception as e:
             aggregator.set_status(name, f"error: {e}")
         if stop_event.is_set():
             break
+        # A connection that stayed up proves the path works, so its eventual
+        # drop is an ordinary disconnect, not the latest in a run of failures.
+        # Without this the backoff only ever grew, and after a few routine
+        # drops every reconnect cost the full ceiling of missing data.
+        if time.time() - started >= _HEALTHY_CONNECTION_SECONDS:
+            backoff = 1
         aggregator.set_status(name, "reconnecting")
-        time.sleep(backoff)
+        # Wait on the stop event rather than sleeping, so stop() isn't held up
+        # by a backoff of up to 30s.
+        if stop_event.wait(backoff):
+            break
         backoff = min(backoff * 2, 30)
     aggregator.set_status(name, "stopped")
 
