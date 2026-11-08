@@ -78,6 +78,11 @@ BYBIT_BOOK_DEPTH = 200
 # that persistence and flow are computed from, and how much of that
 # history to keep.
 BOOK_SAMPLE_INTERVAL_SECONDS = 1.0
+# A venue whose book hasn't changed for this long is left out of the sample.
+# Coinbase's level2_batch pushes every 50ms and the others push every change,
+# so 15s of silence on a BTC book is a frozen feed, not a quiet market. The
+# socket's ping timeout (~30s) used to be the only thing that removed one.
+BOOK_STALE_SECONDS = 15.0
 BOOK_HISTORY_SECONDS = 900
 
 # How much of each local book is kept when it's materialized for the
@@ -229,6 +234,12 @@ KALSHI_VOL_LOOKBACK_MINUTES = 120
 # recomputed on every refresh). Kalshi has answered HTTP 429 to per-refresh
 # polling before. 0 polls on every refresh.
 KALSHI_POLL_SECONDS = 10
+# Refuse to price a strike further than this fraction from spot (0.05 = 5%).
+# BTC doesn't move 5% inside one 15-minute window, so a strike that far off is
+# almost certainly a bad record: Kalshi's own API has served two KXBTC15M
+# strikes divided by 10,000 (7.2437 for 72,437.29), which priced at
+# P(YES) = 100%. See REVIEW_FINDINGS.md, "Is there an edge?".
+KALSHI_MAX_STRIKE_DISTANCE = 0.05
 
 # --- Kalshi prediction tracking / calibration (see kalshi_tracking.py) ---
 # When True, every fair-value computation (each dashboard refresh, while

@@ -27,8 +27,9 @@ such, not slipped in quietly.
   time-ranged historical candle fetch used by the backtest. Also
   `drop_forming_candle()`: a candle is stamped with its bucket's start, so
   the last one may still be forming. Signals and the backtest use completed
-  candles only; the displayed price and the Kalshi model use the latest
-  print (`DashboardState.live_price` / `price_df`).
+  candles only. The displayed price and the Kalshi model's spot come from
+  `/ticker` via `latest_price()` (`DashboardState.live_price`), never from a
+  candle: see gotcha #19. `price_df` (raw candles) is only the vol input.
 - `exchange_feeds.py` -- live WebSocket feeds (Coinbase, Binance.US,
   Bybit trades + liquidations) feeding into `TradeAggregator`, a
   thread-safe rolling buy/sell aggregator. Also has the Binance.US REST
@@ -133,6 +134,20 @@ such, not slipped in quietly.
   `LOG_KALSHI_PREDICTIONS`) and checks them against real settled
   outcomes for calibration (bucketed hit-rate table + Brier score,
   compared against Kalshi's own market price as a baseline).
+- `kalshi_study.py` -- the KXBTC15M edge study (REVIEW_FINDINGS.md, "Is
+  there an edge?"): fetches and caches every settled market and its
+  1-minute candlesticks, plus Coinbase 1-minute history, into
+  `study_data/` (gitignored); per-order fees; train/test split;
+  day-block bootstrap; the model-vs-market comparison. Its docstring holds
+  the pre-registered design. Change it only by adding a labelled
+  amendment, never after looking at outcomes. Kalshi API facts it
+  depends on: the batch `GET /markets/candlesticks` caps a request at
+  10,000 candles (markets x minutes in the range) and returns nothing for
+  markets older than ~2026-08-31, which come one at a time from
+  `/historical/markets/{ticker}/candlesticks`. A candle is stamped with
+  the END of its minute. Some market records have no `floor_strike`, and
+  two have one scaled by 10^-4.
+  `review/kalshi_market_study.py` runs it.
 
 ## Design principles (the "why" behind non-obvious choices)
 
@@ -342,6 +357,11 @@ such, not slipped in quietly.
     rotation, duplicate check and write. Never open a log for append
     anywhere else. `review/csv_writer_race.py` shows before and after;
     `tests/test_csv_utils.py` stress-tests it with separate processes.
+    On Windows, a lock deleted while another process still has it open is
+    "delete pending", and re-creating it raises `PermissionError`, not
+    `FileExistsError`; `file_lock` treats that as busy there (only there --
+    elsewhere it's a real permission error) and waits like any other.
+    First seen on the user's Windows machine, where it crashed writers.
 
 17. **Coinbase's `match.side` is the MAKER's side.** A match with side
     `"sell"` filled a resting sell order, so the taker *bought*.
@@ -353,6 +373,28 @@ such, not slipped in quietly.
     parser must return the TAKER side; `tests/test_exchange_feeds.py`
     pins it per venue and checks that one taker-buy normalizes to "buy"
     on all three.
+
+18. **Windows doesn't read text as UTF-8 by default.** `open()` and
+    `Path.read_text()` without `encoding=` use the locale code page there
+    (cp1252), and `app.py` contains UTF-8 characters, so a bare
+    `read_text()` of it in `tests/test_app.py` stopped the whole suite at
+    collection on the user's machine while passing on Linux. Pass
+    `encoding="utf-8"` whenever a file can hold non-ASCII text.
+    `tests/test_portability.py` re-runs collection (and the tests that read
+    `app.py`) in a child interpreter with UTF-8 mode off and an ASCII locale.
+
+19. **Coinbase's bare `/candles` URL is CDN-cached for 5 minutes.** It
+    comes back `cache-control: public, max-age=300`, a Cloudflare `HIT`.
+    Measured from the user's machine, the newest 1-minute candle advanced
+    23:17 -> 23:22 -> 23:27, with its close frozen in between (even a forming
+    candle's 24-second-old snapshot), up to 5 minutes old and $48 off
+    `/ticker`. The same request with `start`/`end` was a `MISS` in all 18 of
+    18 polls, up to the forming minute, so `get_candles` always sends a range
+    ending now.
+    Never drop it to "simplify". Any price someone acts on still comes from
+    `data_fetch.latest_price()` (the ticker, with a flagged fallback),
+    because even a fresh candle lags the last trade. Never call the network
+    from tests: `tests/conftest.py` makes any real HTTP request raise.
 
 ## Testing approach
 
@@ -434,9 +476,10 @@ now pinned by a test.
 `tests/test_kalshi_api.py` runs against verbatim Kalshi payloads saved in
 `tests/fixtures/` (captured 2026-11-07; the capture URLs are in the test's
 docstring -- re-capture if Kalshi changes its schema). Host note: the tests
-mock the network, and `kalshi_api.BASE_URL` is `external-api.kalshi.com`, but
-the payloads were captured from `api.elections.kalshi.com`, the host that
-answered from the sandbox. Verify BASE_URL against Kalshi's current docs.
+mock the network. `kalshi_api.BASE_URL` is `external-api.kalshi.com`, confirmed
+live from the user's machine on 2026-11-07. The payloads were captured from
+`api.elections.kalshi.com`, which serves the same schema. Cloud sandboxes may
+reach neither: their proxy has refused both hosts.
 
 `signals.py` reads the moving-average columns under the names config implies
 (`sma_{SMA_FAST}` ...), the same way `indicators.py` builds them, so changing

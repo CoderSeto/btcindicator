@@ -21,11 +21,15 @@ import weighting
 @dataclass
 class DashboardState:
     df: Optional[pd.DataFrame] = None           # COMPLETED candles, with indicators
-    # The freshest price, including a still-forming candle. Signals are scored
-    # on completed candles only (see data_fetch.drop_forming_candle); what a
-    # person reads as "the price now", and the Kalshi model, use this instead.
+    # The price now, from Coinbase's ticker (data_fetch.latest_price). Signals
+    # are scored on completed candles only (see data_fetch.drop_forming_candle);
+    # what a person reads as "the price now", and the Kalshi model, use this.
+    # If the ticker failed it's the newest candle's close, which can lag by a
+    # minute or more (data_fetch.CANDLE_CACHE_NOTE) -- live_price_source says so.
     live_price: Optional[float] = None
-    price_df: Optional[pd.DataFrame] = None     # raw candles, forming one included
+    live_price_source: Optional[str] = None     # "ticker" or "candles"
+    live_price_note: Optional[str] = None       # why it isn't the ticker, if it isn't
+    price_df: Optional[pd.DataFrame] = None     # raw candles, forming one included (vol input)
     imbalance: Optional[float] = None
     snapshot: Optional["signals.SignalSnapshot"] = None
     divergence: dict = field(default_factory=dict)
@@ -81,8 +85,10 @@ def load_state(cfg, feed_snapshot: Optional[dict] = None,
     weighted = weighting.weighted_conviction(snap, weights)
     out = outlook_mod.build_outlook(snap, div, confidence, weighted)
 
+    spot = data_fetch.latest_price(cfg.PRODUCT_ID, raw)
     return DashboardState(
-        df=df, live_price=float(raw["close"].iloc[-1]), price_df=raw,
+        df=df, live_price=spot["price"], live_price_source=spot["source"],
+        live_price_note=spot["reason"], price_df=raw,
         imbalance=imbalance, snapshot=snap, divergence=div,
         outlook=out, backtest_results=backtest_results, feed_snapshot=feed_snapshot,
         book_snapshot=book_snapshot, weighted=weighted,

@@ -298,3 +298,64 @@ def test_settlement_probability_expired_and_bad_input():
     assert p(100, 100, 0, 0.5) == 1.0 and p(99, 100, -1, None) == 0.0
     with pytest.raises(ValueError):
         p(100, 100, 5, 0)
+
+
+def test_fair_value_prices_the_given_spot_and_takes_only_vol_from_the_candles():
+    # The candles can be ~5 minutes stale (Coinbase caches /candles), so the caller passes the
+    # ticker's price. Spot must come from it; vol must not change.
+    rng = np.random.default_rng(3)
+    closes = 100_000 * np.exp(np.cumsum(rng.normal(0, 0.0004, 100)))
+    df = _df(closes)
+    strike = closes[-1] + 30
+    from_candles = kalshi.fair_value(df, strike, 2.0, 40)
+    from_ticker = kalshi.fair_value(df, strike, 2.0, 40, current_price=closes[-1] + 60)
+    assert from_candles["current_price"] == closes[-1]                     # default unchanged
+    assert from_ticker["current_price"] == closes[-1] + 60
+    assert from_ticker["annual_vol"] == from_candles["annual_vol"]
+    vol = from_candles["annual_vol"]
+    assert from_ticker["p_yes"] == pytest.approx(kalshi.settlement_probability(closes[-1] + 60, strike, 2.0, vol))
+    assert from_ticker["p_yes_point"] == pytest.approx(kalshi.crossing_probability(closes[-1] + 60, strike, 2.0, vol))
+    assert from_ticker["p_yes"] > 0.5 > from_candles["p_yes"]               # spot crossed the strike
+    assert kalshi.fair_value(df, strike, 2.0, 40, current_price=0)["available"] is False
+
+
+# --- strike guard ---------------------------------------------------------------
+
+def _guard_candles(price=72_000.0, n=200):
+    rng = np.random.default_rng(11)
+    closes = price * np.exp(np.cumsum(rng.normal(0, 3e-4, n)))
+    return pd.DataFrame({"close": closes})
+
+
+# The two real cases from Kalshi's own records (REVIEW_FINDINGS, "Is there an edge?"): the listed
+# floor_strike, and the Coinbase spot the study had 10 minutes before each one's close.
+REAL_BAD_STRIKES = [
+    ("KXBTC15M-26APR131115-15", 7.243729, 72_109.94),       # true strike 72,437.29
+    ("KXBTC15M-26APR131130-30", 7.198773, 71_907.29),       # true strike 71,987.73
+]
+
+
+@pytest.mark.parametrize("ticker,strike,spot", REAL_BAD_STRIKES)
+def test_a_strike_scaled_by_ten_thousand_is_refused_not_priced_at_certainty(ticker, strike, spot):
+    df = _guard_candles(spot)
+    unguarded = kalshi.fair_value(df, strike, 10.0, 120, current_price=spot, max_strike_distance=None)
+    assert unguarded["p_yes"] == 1.0                         # what the page used to show
+    r = kalshi.fair_value(df, strike, 10.0, 120, current_price=spot)
+    assert r["available"] is False and r["strike_rejected"] is True
+    assert r["reason"].startswith("Strike 100.0% from spot -- likely bad.")
+    assert "$" not in r["reason"][:38]                       # the header metric shows the first 38 chars
+
+
+def test_strikes_within_the_limit_are_priced_and_the_limit_is_inclusive():
+    df = _guard_candles()
+    spot = 72_000.0
+    for strike in (spot * 0.98, spot * 1.02, spot * 1.05, spot * 0.95):
+        assert kalshi.fair_value(df, strike, 10.0, 120, current_price=spot)["available"]
+    for strike in (spot * 1.0501, spot * 0.9499, spot * 10):
+        assert not kalshi.fair_value(df, strike, 10.0, 120, current_price=spot)["available"]
+    assert kalshi.fair_value(df, spot * 1.08, 10.0, 120, current_price=spot, max_strike_distance=0.10)["available"]
+
+
+def test_strike_check_returns_none_for_a_plausible_strike():
+    assert kalshi.strike_check(72_437.29, 72_109.94) is None
+    assert kalshi.strike_check(7.243729, 72_109.94, None) is None     # check disabled

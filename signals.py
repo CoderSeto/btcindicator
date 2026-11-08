@@ -148,7 +148,7 @@ def summarize_book(book_snapshot: dict) -> dict:
     }
 
 
-def _orderbook_signal(book: dict, imbalance: Optional[float], cfg) -> str:
+def _orderbook_signal(book: dict, imbalance: Optional[float], cfg) -> Optional[str]:
     """
     The order-book vote.
 
@@ -163,6 +163,10 @@ def _orderbook_signal(book: dict, imbalance: Optional[float], cfg) -> str:
     Without the feeds, this falls back to the original behavior -- one
     Coinbase REST snapshot against IMBALANCE_THRESHOLD, with no time
     dimension available to gate on.
+
+    With neither, there is no reading at all, and this returns None: the
+    caller leaves the vote out ("absent, not neutral"). It used to read the
+    missing snapshot as `imbalance or 0.0`, a perfectly balanced book (D15).
     """
     if book.get("available"):
         direction = book["persistence_direction"]
@@ -170,7 +174,9 @@ def _orderbook_signal(book: dict, imbalance: Optional[float], cfg) -> str:
             return direction
         return "neutral"
 
-    reading = imbalance or 0.0
+    if imbalance is None:
+        return None
+    reading = imbalance
     if reading > cfg.IMBALANCE_THRESHOLD:
         return "bullish"
     if reading < -cfg.IMBALANCE_THRESHOLD:
@@ -215,7 +221,9 @@ def evaluate(df, imbalance: Optional[float], cfg, agg_delta: float = None,
     signals = _evaluate_price_signals(last, prev, cfg)
     book = summarize_book(book_snapshot)
 
-    signals["orderbook"] = _orderbook_signal(book, imbalance, cfg)
+    vote = _orderbook_signal(book, imbalance, cfg)
+    if vote is not None:
+        signals["orderbook"] = vote
 
     # Only voted on when the feeds are actually up and have enough history
     # to measure a change -- an absent signal is left out of the snapshot

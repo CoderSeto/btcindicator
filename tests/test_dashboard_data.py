@@ -312,3 +312,123 @@ def test_without_a_forming_candle_live_price_is_the_last_close(tmp_path, net):
     st = dashboard_data.load_state(make_cfg(tmp_path))                  # fixture candles end in the past
     assert len(st.df) == len(net.df)
     assert st.live_price == pytest.approx(net.df["close"].iloc[-1]) == pytest.approx(st.snapshot.price)
+
+
+# ---------- the live price comes from /ticker (the candles are cached ~5 minutes) ----------
+# Ticker payload: the shape of the "Get product ticker" example in Coinbase Exchange's REST docs
+# (ask, bid, volume, trade_id, price, size, time; numbers as strings). `price` was read live from
+# the user's machine on 2026-11-07; re-verify the rest against the docs when they're reachable.
+TICKER = {"ask": "75712.35", "bid": "75712.33", "volume": "8021.11", "trade_id": 912345678,
+          "price": "75712.34", "size": "0.004", "time": "2026-11-07T18:07:29.512Z"}
+
+
+class _Resp:
+    def __init__(self, payload, status=200):
+        self.payload, self.status_code = payload, status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise data_fetch.requests.HTTPError(f"{self.status_code} error")
+
+    def json(self):
+        return self.payload
+
+
+def test_latest_price_reads_the_ticker(monkeypatch):
+    seen = []
+    monkeypatch.setattr(data_fetch.requests, "get", lambda url, **k: seen.append(url) or _Resp(TICKER))
+    got = data_fetch.latest_price("BTC-USD", candles(5))
+    assert seen == ["https://api.exchange.coinbase.com/products/BTC-USD/ticker"]
+    assert got["source"] == "ticker" and got["price"] == 75_712.34 and got["reason"] is None
+    assert got["time"] == pd.Timestamp("2026-11-07T18:07:29.512Z")
+
+
+@pytest.mark.parametrize("failure", [
+    lambda url, **k: _Resp({"message": "rate limited"}, status=429),
+    lambda url, **k: (_ for _ in ()).throw(data_fetch.requests.ConnectionError("down")),
+    lambda url, **k: _Resp({**TICKER, "price": "0"}),
+    lambda url, **k: _Resp({k: v for k, v in TICKER.items() if k != "price"}),
+])
+def test_latest_price_falls_back_to_the_newest_candle_and_says_why(monkeypatch, failure):
+    monkeypatch.setattr(data_fetch.requests, "get", failure)
+    df = candles(5)
+    got = data_fetch.latest_price("BTC-USD", df)
+    assert got["source"] == "candles" and got["price"] == pytest.approx(df["close"].iloc[-1])
+    assert got["reason"].startswith("ticker unavailable")
+
+
+def test_latest_price_with_nothing_to_fall_back_on_is_none(monkeypatch):
+    monkeypatch.setattr(data_fetch, "get_ticker", lambda p: (_ for _ in ()).throw(RuntimeError("down")))
+    assert data_fetch.latest_price("BTC-USD", None)["price"] is None
+    assert data_fetch.latest_price("BTC-USD", candles(5).iloc[:0])["price"] is None
+
+
+def test_load_state_takes_the_live_price_from_the_ticker(tmp_path, net, monkeypatch):
+    monkeypatch.setattr(data_fetch, "get_ticker", lambda p: TICKER)
+    st = dashboard_data.load_state(make_cfg(tmp_path))
+    assert st.error is None
+    assert st.live_price == 75_712.34 and st.live_price_source == "ticker" and st.live_price_note is None
+    assert st.snapshot.price == pytest.approx(net.df["close"].iloc[-1])  # signals still on candles
+    assert len(st.price_df) == len(net.df)                              # vol input unchanged
+
+
+def test_load_state_survives_a_failed_ticker_and_flags_the_fallback(tmp_path, net, monkeypatch):
+    monkeypatch.setattr(data_fetch, "get_ticker", lambda p: (_ for _ in ()).throw(RuntimeError("429")))
+    st = dashboard_data.load_state(make_cfg(tmp_path))
+    assert st.error is None                                             # not an error state
+    assert st.live_price == pytest.approx(net.df["close"].iloc[-1])
+    assert st.live_price_source == "candles" and "429" in st.live_price_note
+
+
+# ---------- get_candles always asks for a range, never the CDN-cached bare URL ----------
+# From the user's machine, 2026-11-07, 23:44:08 UTC: `/candles?granularity=60` came back
+# `cf-cache-status: HIT, age: 113, cache-control: public, max-age=300` with newest candle 23:42,
+# while the same request with start/end was a MISS whose newest candle was 23:43.
+
+def _capture_candle_requests(monkeypatch, rows):
+    seen = []
+
+    def get(url, params=None, **k):
+        seen.append((url, dict(params or {})))
+        return _Resp(rows)
+    monkeypatch.setattr(data_fetch.requests, "get", get)
+    return seen
+
+
+def test_get_candles_sends_a_range_ending_now(monkeypatch):
+    now = pd.Timestamp("2026-11-07T23:44:08.25Z").to_pydatetime()
+    rows = [[1_794_354_000 - 60 * i, 1.0, 2.0, 1.5, 1.6, 3.0] for i in range(250)]   # newest first
+    seen = _capture_candle_requests(monkeypatch, rows)
+    df = data_fetch.get_candles("BTC-USD", 60, limit=200, now=now)
+    (url, params), = seen
+    assert url == "https://api.exchange.coinbase.com/products/BTC-USD/candles"
+    assert params["granularity"] == 60
+    end, start = pd.Timestamp(params["end"]), pd.Timestamp(params["start"])
+    assert end == pd.Timestamp(now)
+    assert (end - start).total_seconds() == 60 * 201            # the limit, plus a possibly forming bucket
+    assert len(df) == 200 and df["time"].is_monotonic_increasing
+
+
+def test_get_candles_range_stays_inside_coinbases_300_candle_cap(monkeypatch):
+    seen = _capture_candle_requests(monkeypatch, [])
+    data_fetch.get_candles("BTC-USD", 300, limit=1000, now=pd.Timestamp("2026-11-07T23:44:08Z").to_pydatetime())
+    (_, params), = seen
+    span = (pd.Timestamp(params["end"]) - pd.Timestamp(params["start"])).total_seconds() / 300
+    assert span + 1 <= 300                                      # even an unaligned start stays under 300 buckets
+
+
+def test_consecutive_get_candles_calls_never_reuse_a_url(monkeypatch):
+    # The cache keys on the URL; two calls a second apart must not share one.
+    seen = _capture_candle_requests(monkeypatch, [])
+    t = pd.Timestamp("2026-11-07T23:44:08Z").to_pydatetime()
+    data_fetch.get_candles("BTC-USD", 60, now=t)
+    data_fetch.get_candles("BTC-USD", 60, now=t + pd.Timedelta(seconds=1))
+    assert seen[0][1] != seen[1][1]
+
+
+def test_get_candles_as_the_app_calls_it_never_sends_the_bare_cached_url(monkeypatch):
+    seen = _capture_candle_requests(monkeypatch, [])
+    data_fetch.get_candles("BTC-USD", 60, 200)                  # the call dashboard_data/main make
+    (_, params), = seen
+    assert {"start", "end"} <= params.keys(), "the bare URL is CDN-cached for 300s"
+    assert abs(pd.Timestamp(params["end"]) - pd.Timestamp.now(tz="UTC")) < pd.Timedelta(seconds=5)

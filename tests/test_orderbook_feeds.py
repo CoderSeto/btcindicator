@@ -686,3 +686,58 @@ def test_a_new_wall_at_another_price_does_not_inherit_an_old_walls_age():
     new = [w for w in agg._aged_walls(1031.0) if w["price"] == 100_900.0]
     assert len(new) == 1
     assert new[0]["age_seconds"] == 0.0 and new[0]["held"] is False
+
+
+# --- D12: a venue whose book stops changing is left out of the read ----------------------------
+# LocalBook.last_update_ts was set on every change but never read, so a venue whose feed froze
+# kept voting with its last picture of the book until the socket's ping timeout (~30s) closed it.
+
+class _StaleCfg(_Cfg):
+    BOOK_STALE_SECONDS = 15.0
+
+
+def _two_venues(monkeypatch):
+    clock = _clocked(monkeypatch)
+    agg = obf.BookAggregator(_StaleCfg)
+    agg.apply_snapshot("coinbase", [["99999", "10"]], [["100001", "10"]])  # balanced
+    agg.apply_snapshot("bybit", [["99998", "30"]], [["100002", "10"]])     # bid-heavy
+    return clock, agg
+
+
+def test_a_frozen_venue_is_left_out_once_its_book_stops_changing(monkeypatch):
+    clock, agg = _two_venues(monkeypatch)
+    assert agg.sample()["venue_count"] == 2
+    for _ in range(16):                                    # coinbase keeps updating, bybit goes silent
+        clock["t"] += 1.0
+        agg.apply_changes("coinbase", [("bid", 99999.0, 10.0)])
+        aggregate = agg.sample()
+    assert aggregate["venue_count"] == 1 and set(aggregate["venues"]) == {"coinbase"}
+    assert abs(aggregate["imbalance"]) < 1e-4                          # bybit's bid lean (~+0.5) is gone
+    snap = agg.snapshot()
+    assert snap["available"] and snap["frozen_venues"] == ["bybit"]
+
+
+def test_a_book_silent_for_exactly_the_threshold_still_counts(monkeypatch):
+    clock, agg = _two_venues(monkeypatch)
+    clock["t"] += 15.0
+    agg.apply_changes("coinbase", [("bid", 99999.0, 10.0)])
+    assert agg.sample()["venue_count"] == 2                # 15.0s is not "more than 15s"
+
+
+def test_a_frozen_venue_rejoins_when_it_updates_again(monkeypatch):
+    clock, agg = _two_venues(monkeypatch)
+    clock["t"] += 20.0
+    agg.apply_changes("coinbase", [("bid", 99999.0, 10.0)])
+    assert agg.sample()["venue_count"] == 1
+    agg.apply_changes("bybit", [("bid", 99998.0, 30.0)])
+    assert agg.sample()["venue_count"] == 2
+    assert agg.snapshot()["frozen_venues"] == []
+
+
+def test_every_venue_frozen_is_no_read_not_the_last_one(monkeypatch):
+    clock, agg = _two_venues(monkeypatch)
+    assert agg.sample() is not None
+    clock["t"] += 16.0
+    assert agg.sample() is None
+    snap = agg.snapshot()
+    assert snap["available"] is False and snap["frozen_venues"] == ["bybit", "coinbase"]

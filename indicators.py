@@ -25,8 +25,13 @@ def add_rsi(df: pd.DataFrame, period: int, col: str = "close") -> pd.DataFrame:
     avg_loss = loss.rolling(period).mean()
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    df["rsi"] = 100 - (100 / (1 + rs))
-    df["rsi"] = df["rsi"].fillna(50)  # neutral when undefined (e.g. no losses yet)
+    rsi = 100 - (100 / (1 + rs))
+    # No losses in the window: gains only is the most overbought a window can
+    # be (RSI 100, the limit as losses -> 0), not neutral. It used to read 50,
+    # so a one-way run cast no overbought vote at all. A flat window (no gains
+    # either) and the warm-up candles stay neutral at 50.
+    rsi = rsi.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    df["rsi"] = rsi.fillna(50)
     return df
 
 

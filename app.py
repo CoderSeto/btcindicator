@@ -17,6 +17,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 import backtest
+import data_fetch
 import config as shared_config
 import exchange_feeds
 import kalshi
@@ -56,6 +57,14 @@ def _esc(text: str) -> str:
     and don't need it.
     """
     return text.replace("$", r"\$")
+
+
+def _book_status(book_snapshot: dict) -> dict:
+    """Depth-feed status per venue, with a connected venue whose book stopped
+    changing shown as frozen: it's left out of the read (BOOK_STALE_SECONDS)."""
+    frozen = set(book_snapshot.get("frozen_venues", []))
+    return {v: ("frozen, not counted" if v in frozen else s)
+            for v, s in book_snapshot.get("status", {}).items()}
 
 
 def _venue_status(status: dict):
@@ -261,8 +270,12 @@ if state.error:
 
 df, imbalance, snapshot = state.df, state.imbalance, state.snapshot
 # Signals are scored on completed candles (`df`); the header price and the
-# Kalshi model want the freshest print, forming candle included.
+# Kalshi model use the ticker's last trade (a candle's close can lag it).
 live_price, price_df = state.live_price, state.price_df
+stale_price_warning = None
+if state.live_price_source != "ticker":
+    stale_price_warning = (f"\u26A0\uFE0F Price from the newest candle, not the ticker "
+                           f"({state.live_price_note}). {data_fetch.CANDLE_CACHE_NOTE}.")
 book_read = snapshot.book or {}
 outlook_result = state.outlook
 log_signal_snapshot(snapshot)
@@ -304,7 +317,8 @@ if "kalshi_minutes" not in st.session_state:
 
 kalshi_result = kalshi.fair_value(
     price_df, st.session_state["kalshi_strike"], st.session_state["kalshi_minutes"],
-    cfg.KALSHI_VOL_LOOKBACK_MINUTES, candle_seconds=cfg.GRANULARITY,
+    cfg.KALSHI_VOL_LOOKBACK_MINUTES, candle_seconds=cfg.GRANULARITY, current_price=live_price,
+    max_strike_distance=cfg.KALSHI_MAX_STRIKE_DISTANCE,
 )
 
 # Only log a row that prices the tracked market's own strike. A hand-edited
@@ -326,6 +340,13 @@ if (kalshi_result["available"] and kalshi_live and kalshi_live["available"]
         kalshi_last_price=kalshi_live["last_price"],
         p_yes_point=kalshi_result["p_yes_point"],
     )
+
+# The study's answer to "is the model-vs-market gap an edge?", shown wherever the gap is.
+MODEL_VS_MARKET_NOTE = (
+    "Model minus market is not a trading signal. On 30,688 settled KXBTC15M contracts the model "
+    "scored worse than Kalshi's own mid on held-out data, and trading toward it lost money after "
+    "fees (REVIEW_FINDINGS.md, \"Is there an edge?\")."
+)
 
 kalshi_quote = None
 if (kalshi_live and kalshi_live["available"]
@@ -357,8 +378,11 @@ head_cols = st.columns(4)
 with head_cols[0]:
     with st.container(border=True):
         st.metric(product_id, f"${live_price:,.2f}",
-                  help="Latest price. The signals below are scored on completed candles only, "
-                       "like the backtest, so they can lag this by up to one candle.")
+                  help="Last trade, from Coinbase's ticker. The signals below are scored on "
+                       "completed candles only, like the backtest, so they can lag this by up "
+                       "to one candle.")
+        if stale_price_warning:
+            st.caption(_esc(stale_price_warning))
 with head_cols[1]:
     with st.container(border=True):
         st.metric(
@@ -397,7 +421,8 @@ with head_cols[3]:
                    f"{kalshi_result['minutes_remaining']:.1f} min left")
             st.metric("Kalshi P(YES)", f"{kalshi_result['p_yes'] * 100:.1f}%", gap,
                       help="Model fair value for the strike below. Never blended with the "
-                           "bot's directional signals -- see the Notes tab.")
+                           "bot's directional signals -- see the Notes tab."
+                           + (" " + MODEL_VS_MARKET_NOTE if kalshi_quote is not None else ""))
 
 # --- Signal badges ----------------------------------------------------------
 short_labels = {
@@ -461,7 +486,7 @@ with left:
                        "-- using the values above.")
 
         if not kalshi_result["available"]:
-            st.warning(f"Can't compute fair value: {kalshi_result['reason']}")
+            st.warning(_esc(f"Can't compute fair value: {kalshi_result['reason']}"))
         else:
             r1, r2, r3 = st.columns(3)
             with r1:
@@ -483,6 +508,10 @@ with left:
             if kalshi_live and kalshi_live["available"]:
                 bits.append(f"`{kalshi_live['ticker']}`")
             st.caption(_esc(" \u00b7 ".join(bits)))
+            if stale_price_warning:
+                st.caption(_esc(stale_price_warning))
+            if kalshi_quote is not None:
+                st.caption(_esc(MODEL_VS_MARKET_NOTE))
             if kalshi_result["final_minute"]:
                 st.caption("\u26A0\uFE0F Final minute: part of the settlement average is already "
                            "fixed, and it's assumed to equal the current price. Rough.")
@@ -546,13 +575,13 @@ with tab_book, st.container(height=TAB_BODY_HEIGHT, border=False):
         st.caption("Depth feeds not available for this pair.")
     elif not book_snapshot.get("available"):
         st.caption(f"Waiting on depth feeds -- {book_snapshot.get('reason', 'no book yet')}.")
-        _venue_status(book_snapshot.get("status", {}))
+        _venue_status(_book_status(book_snapshot))
     else:
         agg = book_snapshot["aggregate"]
         persistence = book_snapshot["persistence"]
         flow = book_snapshot["flow"]
 
-        _venue_status(book_snapshot["status"])
+        _venue_status(_book_status(book_snapshot))
 
         book_cols = st.columns(4)
         with book_cols[0]:
@@ -706,9 +735,9 @@ with tab_notes, st.container(height=TAB_BODY_HEIGHT, border=False):
 
         if kalshi_quote is not None and kalshi_result["available"]:
             st.caption(
-                "**On the model-vs-market gap:** it can reflect a real mispricing, or just this "
-                "model's own approximations above being wrong instead. Worth understanding why "
-                "before trusting it."
+                "**On the model-vs-market gap:** " + _esc(MODEL_VS_MARKET_NOTE) + " A gap is far "
+                "more often this model's own approximations above (Coinbase as a proxy for the "
+                "index, minute-level data) than a mispricing."
             )
 
         path = _strike_path_liquidity(book_snapshot, kalshi_result, cfg)

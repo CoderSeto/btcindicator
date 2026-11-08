@@ -101,12 +101,16 @@ def test_falls_back_to_the_single_snapshot_reading_without_depth_feeds():
     assert flat.individual["orderbook"] == "neutral"
 
 
-def test_a_missing_legacy_reading_does_not_crash_the_fallback():
-    """imbalance=None means the REST snapshot was skipped -- the fallback
-    must read that as 'nothing to say', not blow up."""
+def test_no_book_reading_at_all_leaves_the_vote_out_rather_than_neutral():
+    """imbalance=None with no live book means nothing was read. That is an absent vote, not a
+    neutral one (design principle 5, D15): it used to become `imbalance or 0.0`, a reading of a
+    perfectly balanced book, and count in the composite's denominator."""
     snap = signals.evaluate(flat_candles(), None, Cfg, book_snapshot=None)
-    assert snap.individual["orderbook"] == "neutral"
+    assert "orderbook" not in snap.individual
     assert snap.imbalance is None
+    with_reading = signals.evaluate(flat_candles(), 0.0, Cfg, book_snapshot=None)
+    assert with_reading.individual["orderbook"] == "neutral"            # a real 0.0 is still a vote
+    assert len(with_reading.individual) == len(snap.individual) + 1
 
 
 def test_an_unavailable_book_snapshot_uses_the_fallback_not_a_crash():

@@ -132,13 +132,26 @@ def test_no_bullish_for_higher_or_equal_low():
 
 # ---------- precedence, windows, guards ----------
 
-def test_bearish_wins_when_both_patterns_are_present():
-    # Highs 5 -> 6 with RSI down (bearish) AND lows 2.0 -> 1.5 with RSI up (bullish).
+def test_the_more_recent_pattern_wins_when_both_are_present_bearish_newer():
+    # Highs 5 -> 6 with RSI down (bearish, completed at index 10) AND lows 2.0 -> 1.5 with RSI up
+    # (bullish, completed at index 8): the bearish one is newer.
     df = build([3, 5, 6], rsi_at_peaks=[50, 70, 60], troughs=[1, 2.0, 1.5, 1], rsi_at_troughs={1: 30, 2: 40})
     assert run(df)["type"] == "bearish"
     # Remove the bearish half (RSI now confirms the high) and bullish is reported.
     df2 = build([3, 5, 6], rsi_at_peaks=[50, 60, 70], troughs=[1, 2.0, 1.5, 1], rsi_at_troughs={1: 30, 2: 40})
     assert run(df2)["type"] == "bullish"
+
+
+def test_a_newer_bullish_divergence_is_not_masked_by_an_older_bearish_one():
+    # D13. Bearish completes at the high at index 10 (5 -> 6, RSI 70 -> 60). Then price makes a
+    # lower low at index 12 (1.8 -> 1.5) with RSI higher (30 -> 40): a bullish divergence, two
+    # candles NEWER. The old code checked bearish first and returned it, so this was never shown.
+    df = build([3, 5, 6], rsi_at_peaks=[50, 70, 60], troughs=[1, 2.0, 1.8, 1.5], rsi_at_troughs={2: 30, 3: 40})
+    df = pd.concat([df, pd.DataFrame({"close": [1.6, 1.7], "rsi": [50.0, 50.0]})], ignore_index=True)
+    lows = divergence._swing_points(df["close"], ORDER)[1]
+    assert lows[-2:] == [8, 12]                                       # the setup is what it claims
+    got = run(df)
+    assert got["type"] == "bullish" and "lower low" in got["detail"]
 
 
 def test_lookback_window_ignores_older_candles():

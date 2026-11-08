@@ -58,6 +58,7 @@ class Env:
         self.candle_requests = []
         self.kalshi_calls = 0
         self.candle_error = None
+        self.ticker = None                      # None: the ticker request fails (the page falls back)
         self.feed_snapshot = None
         self.book_snapshot = None
 
@@ -76,6 +77,8 @@ def make_book_snapshot(monkeypatch):
         agg.set_status(venue, "connected")
     for _ in range(60):
         clock["t"] += 1.0
+        for venue, shift in (("coinbase", 0.0), ("binance_us", 2.0)):    # live feeds keep sending:
+            agg.apply_changes(venue, [("bid", 75_699.99 + shift, 2.0)])  # a same-size refresh
         assert agg.sample() is not None
     snap = agg.snapshot()
     assert snap["available"] and any(w["held"] for w in snap["walls"])
@@ -117,6 +120,12 @@ def env(monkeypatch, tmp_path):
         return e.df.copy()
     monkeypatch.setattr(data_fetch, "get_candles", get_candles)
     monkeypatch.setattr(data_fetch, "get_order_book", lambda *a, **k: REST_BOOK)
+
+    def get_ticker(product_id):
+        if e.ticker is None:
+            raise RuntimeError("ticker down")
+        return dict(e.ticker)
+    monkeypatch.setattr(data_fetch, "get_ticker", get_ticker)
 
     def current():
         e.kalshi_calls += 1
@@ -175,7 +184,7 @@ def no_exception(at):
 # ---------- the pure helpers, lifted from app.py ----------
 
 def _load_helpers():
-    tree = ast.parse((ROOT / "app.py").read_text())
+    tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
     wanted = {"_esc", "_strike_path_liquidity"}
     funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
     assert {f.name for f in funcs} == wanted
@@ -708,6 +717,49 @@ def test_kalshi_auto_track_only_follows_the_btc_contract_on_btc_usd(env):
     assert "only tracks KXBTC15M on BTC-USD" in all_text(at)
 
 
+def test_a_bad_strike_from_kalshi_shows_the_reason_instead_of_a_certain_p_yes(env):
+    # Kalshi's own record for KXBTC15M-26APR131115-15 listed floor_strike 7.243729 (the true
+    # strike divided by 10,000). Unguarded, the page showed P(YES) = 100.0% and logged it.
+    cfg.LOG_KALSHI_PREDICTIONS = True
+    env.kalshi = kalshi_live(floor_strike=7.243729)
+    at = run()
+    no_exception(at)
+    assert at.number_input(key="kalshi_strike").value == pytest.approx(7.243729)
+    assert metric(at, "Kalshi P(YES)").value == "--"
+    assert metric(at, "Kalshi P(YES)").delta.startswith("Strike 100.0% from spot")
+    assert not [m for m in at.metric if m.label == "P(YES)"]
+    warning = " ".join(w.value for w in at.warning)
+    assert "likely bad" in warning and "divided by 10,000" in warning
+    assert not re.search(r"(?<!\\)\$", warning)                        # money escaped
+    assert not pathlib.Path(cfg.KALSHI_PREDICTIONS_LOG_PATH).exists()      # nothing logged
+
+
+def test_the_model_vs_market_gap_carries_the_studys_answer_wherever_it_is_shown(env):
+    # REVIEW_FINDINGS "Is there an edge?": the model scored worse than Kalshi's mid on held-out
+    # contracts, so the "pts vs market" gap must not read as an edge.
+    at = run()
+    no_exception(at)
+    assert metric(at, "Kalshi P(YES)").delta.endswith("pts vs market")
+    assert "not a trading signal" in metric(at, "Kalshi P(YES)").help
+    captions = [c.value for c in at.caption if "not a trading signal" in c.value]
+    assert captions, "no caveat next to the Market YES gap"
+    assert all("scored worse than Kalshi's own mid on held-out data" in c and "Is there an edge?" in c
+               for c in captions)
+    notes = all_text(at)
+    assert "it can reflect a real mispricing" not in notes                 # the old framing is gone
+    # With no market quote there is no gap, and no caveat about one.
+    at.checkbox(key="kalshi_auto_track").uncheck().run()
+    assert not [c for c in at.caption if "not a trading signal" in c.value]
+    assert "not a trading signal" not in (metric(at, "Kalshi P(YES)").help or "")
+
+
+def test_readme_answers_the_edge_question_next_to_the_gap():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "is there an edge here\" question" not in readme
+    assert "**The gap is not a signal -- this was tested.**" in readme
+    assert "That gap is not a trading signal" in readme
+
+
 def test_notes_describe_the_settlement_average_model_and_its_final_minute_limit(env):
     # P(YES) now prices the 60-second average (kalshi.settlement_probability). What remains a
     # limitation is the final minute, where the already-elapsed prints are taken at spot.
@@ -825,7 +877,7 @@ def test_the_page_uses_no_deprecated_streamlit_apis(env, caplog):
     # replaces it on st.button / st.dataframe / st.plotly_chart from Streamlit 1.51 on, which is
     # why requirements.txt pins streamlit>=1.51.
     import logging
-    assert "use_container_width" not in (ROOT / "app.py").read_text()     # incl. feed-only panels
+    assert "use_container_width" not in (ROOT / "app.py").read_text(encoding="utf-8")     # incl. feed-only panels
     go_live(env)                                                           # render the feed tables too
     with caplog.at_level(logging.WARNING, logger="streamlit"):
         at = run()
@@ -833,3 +885,62 @@ def test_the_page_uses_no_deprecated_streamlit_apis(env, caplog):
     deprecations = [r.getMessage() for r in caplog.records
                     if "deprecat" in r.name or "use_container_width" in r.getMessage()]
     assert deprecations == []
+
+
+# ---------- spot from the ticker, not the ~5-minute-cached candles ----------
+# Measured from the user's machine on 2026-11-07: Coinbase's /candles response changed only every
+# ~5 minutes (newest candle 23:17 -> 23:22 -> 23:27, its close frozen in between) and sat up to $48
+# (~6bp) off /ticker. The header and the Kalshi model now read the ticker.
+
+TICKER = {"ask": "75712.35", "bid": "75712.33", "volume": "8021.11", "trade_id": 912345678,
+          "price": "75712.34", "size": "0.004", "time": "2026-11-07T18:07:29.512Z"}
+
+
+def test_header_and_kalshi_price_come_from_the_ticker_not_the_cached_candles(env):
+    env.ticker = TICKER
+    env.kalshi = {"available": False, "reason": "x"}
+    at = run()
+    no_exception(at)
+    candle_close = env.df["close"].iloc[-1]
+    assert abs(candle_close - 75_712.34) > 5                               # the two really differ
+    assert metric(at, "BTC-USD").value == "$75,712.34"
+    text = all_text(at).replace("\\$", "$")
+    assert "$75,712.34 vs" in text                                         # Kalshi caption
+    assert "not the ticker" not in text
+    want = kalshi.fair_value(env.df, at.session_state["kalshi_strike"], at.session_state["kalshi_minutes"],
+                             cfg.KALSHI_VOL_LOOKBACK_MINUTES, current_price=75_712.34)
+    assert metric(at, "P(YES)").value == f"{want['p_yes'] * 100:.1f}%"
+
+
+def test_a_failed_ticker_falls_back_to_the_candle_and_warns_it_may_be_stale(env):
+    env.ticker = None
+    env.kalshi = {"available": False, "reason": "x"}
+    at = run()
+    no_exception(at)
+    assert metric(at, "BTC-USD").value == f"${env.df['close'].iloc[-1]:,.2f}"
+    stale = [c.value for c in at.caption if "not the ticker" in c.value]
+    assert len(stale) == 2                                                 # header and Kalshi block
+    assert all("ticker down" in c and "lag the last trade" in c for c in stale)
+
+
+def test_logged_predictions_record_the_ticker_spot(env):
+    cfg.LOG_KALSHI_PREDICTIONS = True
+    env.ticker = TICKER
+    run()
+    row = pd.read_csv(cfg.KALSHI_PREDICTIONS_LOG_PATH).iloc[0]
+    assert row["current_price"] == pytest.approx(75_712.34)
+    want = kalshi.fair_value(env.df, 75_743.66, 7.5, cfg.KALSHI_VOL_LOOKBACK_MINUTES, current_price=75_712.34)
+    assert row["p_yes"] == pytest.approx(want["p_yes"])
+
+
+def test_a_frozen_depth_venue_shows_as_frozen_not_connected(env):
+    # D12: a connected venue whose book stopped changing is left out of the read; the status row
+    # must say so rather than show it green.
+    go_live(env)
+    env.book_snapshot = {**env.book_snapshot, "frozen_venues": ["binance_us"]}
+    at = run()
+    no_exception(at)
+    row = [m.value for m in at.markdown if "binance_us" in m.value and "<b>" in m.value]
+    assert row and "frozen, not counted" in row[0] and "\U0001F534" in row[0]
+    coinbase = [m.value for m in at.markdown if "<b>coinbase</b>" in m.value]
+    assert coinbase and "\U0001F7E2" in coinbase[0]
