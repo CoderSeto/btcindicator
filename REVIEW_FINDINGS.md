@@ -355,8 +355,10 @@ model is worse. Intervals use z = 3.62.
 
 - **Held-out:** the market is significantly better at 5 and 2 minutes on both metrics. At 10
   minutes the raw model is worse and the adjusted one is not distinguishable from the market.
-- **The gap grows toward the close.** That is where Coinbase-vs-index noise and the
-  one-minute-old spot matter most.
+- **The gap grows toward the close.** Spot is the last Coinbase trade just before the horizon (the
+  close of the candle [t − 60, t)), so it is not stale. What hurts late in the window is the data
+  itself: minute-level Coinbase data, and the Coinbase-vs-index basis (next section). Both matter
+  most once the settlement average is only a few basis points from the strike.
 - **Basis adjustment helps marginally.** It improves log-loss by 0.0006–0.003, nowhere near enough to
   catch the market.
 - **Calibration.** The adjusted model's calibration slope on train is 1.07, 1.20 and 1.32 at 10, 5
@@ -364,8 +366,9 @@ model is worse. Intervals use z = 3.62.
 - **Size of disagreement.** The model and the mid differ by 4–5¢ on average. That is the model's
   noise, not edge.
 - **Counting.** These 24 intervals include the 12 train comparisons, which the 168-test family
-  counted only once. Counting all 24 gives 180 tests and z = 3.65. That moves only the borderline
-  raw-model 10-minute held-out interval to touching zero.
+  counted only once. Counting all 24 gives 180 tests and z = 3.635. No interval changes sign: the
+  borderline raw-model 10-minute held-out intervals keep lower bounds of +0.00009 (Brier) and
+  +0.00014 (log-loss).
 
 **Trading toward the model.** Buy whichever side clears the ask (or 1 − bid) plus the per-order fee
 by an extra margin. The grid is margins 0, 2¢ and 5¢ × raw or adjusted spot × 3 horizons × order
@@ -411,9 +414,12 @@ low and close of the matching minute. Units are basis points of (index ÷ Coinba
 contract's `expiration_value`, and the settled outcome matches it. `KXBTC15M-26APR131130-30` has
 7.1988 instead of 71,987.73.
 
-- **Effect on this study.** The model priced both at P = 1.0. That is 2 contracts in about 21,000
-  per horizon, adding at most 0.0005 to log-loss and 0.00005 to Brier. They are left in, as run, and
-  change no conclusion. Step 2 used market prices only and is unaffected.
+- **Effect on this study.** The model priced both at P = 1.0. Both are in train. Only
+  `…1115-15` settled NO, costing the clipped −ln(10⁻⁴) = 9.21 in log-loss and 1 in Brier;
+  `…1130-30` settled YES and cost nothing. Per horizon (about 17,000–21,000 rows) that adds
+  0.00043–0.00053 to the model's log-loss and 0.000047–0.000058 to its Brier, measured. Had both
+  settled NO it would be about twice that. They are left in, as run, and change no conclusion.
+  Step 2 used market prices only and is unaffected.
 - **Effect on the live tool.** `kalshi_api.parse_market` reads the same field, so the same error on a
   live contract would show **P(YES) = 100%**. *Recommended, not yet done:* reject a strike more than
   a few percent from spot, or cross-check it against the previous contract's `expiration_value`.
