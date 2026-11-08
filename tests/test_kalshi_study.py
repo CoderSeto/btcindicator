@@ -328,22 +328,84 @@ def test_settled_markets_paginate_and_merge_live_with_historical(no_sleep):
         "KXBTC15M-26NOV071830-30", "KXBTC15M-26NOV071845-45"]
 
 
-def test_candle_cache_resumes_and_records_markets_kalshi_did_not_return(tmp_path, no_sleep):
-    markets = [ks.parse_settled_market(m) for m in LIVE_PAGE["markets"] + HIST_PAGE["markets"]]
-    entries = {e["market_ticker"]: e for e in LIVE_CANDLES["markets"] + HIST_CANDLES["markets"]}
+HIST_SINGLE = load("kalshi_historical_market_candles.json")    # per-market /historical/ endpoint
 
+
+def test_the_per_market_historical_payload_parses_with_bare_close_keys():
+    # Verbatim, captured 2026-11-07 from
+    # GET /historical/markets/KXBTC15M-25DEC151530-30/candlesticks?start_ts=1765829700&end_ts=1765830600&period_interval=1
+    c = ks.parse_candles(HIST_SINGLE["candlesticks"])
+    assert ks.quote_at(c, 1765830600 - 600) == (0.0, 1.0, 0.34)          # no bid: not a valid book
+    assert ks.quote_at(c, 1765830600 - 300) == (0.35, 0.79, None)        # thin book, no trade
+    assert ks.quote_at(c, 1765830600 - 120) == (0.35, 0.91, 0.91)
+
+
+def _routing_handler(entries, singles):
     def handler(url, p):
-        assert url.endswith("/markets/candlesticks") and p["period_interval"] == 1
-        want = p["market_tickers"].split(",")
-        return FakeResponse(200, {"markets": [entries[t] for t in want if t in entries]})
-    s = FakeSession(handler)
+        assert p["period_interval"] == 1
+        if url.endswith("/markets/candlesticks"):
+            want = p["market_tickers"].split(",")
+            return FakeResponse(200, {"markets": [entries[t] for t in want if t in entries]})
+        ticker = url.split("/markets/")[1].split("/")[0]
+        if "/historical/" in url and ticker in singles:
+            return FakeResponse(200, {"candlesticks": singles[ticker], "ticker": ticker})
+        return FakeResponse(404, {})
+    return handler
+
+
+def test_markets_a_batch_omits_are_fetched_one_at_a_time_before_being_called_empty(tmp_path, no_sleep):
+    markets = [ks.parse_settled_market(m) for m in LIVE_PAGE["markets"] + HIST_PAGE["markets"]]
+    entries = {e["market_ticker"]: e for e in LIVE_CANDLES["markets"]}        # batch knows only the live two
+    singles = {"KXBTC15M-26SEP071945-45": HIST_CANDLES["markets"][0]["candlesticks"]}
+    s = FakeSession(_routing_handler(entries, singles))
     assert ks.fetch_missing_candles(s, markets, str(tmp_path)) == 4
     cached = ks.load_candles(str(tmp_path))
-    assert set(cached) == {m["ticker"] for m in markets}
-    assert cached["KXBTC15M-26SEP071930-30"] == []                    # not returned: cached empty
+    assert len(cached["KXBTC15M-26SEP071945-45"]) == 15                  # recovered per market
+    assert cached["KXBTC15M-26SEP071930-30"] == []                       # every endpoint had nothing
+    tried = [u for u, _ in s.calls if "KXBTC15M-26SEP071930-30/" in u]
+    assert len(tried) == 2                                               # historical, then live series
     # A torn last line from an interrupted run is ignored, and nothing is refetched.
     with open(tmp_path / "kalshi_candles.jsonl", "a", encoding="utf-8") as f:
         f.write('{"market_ticker": "T')
     n = len(s.calls)
     assert ks.fetch_missing_candles(s, markets, str(tmp_path)) == 0
     assert len(s.calls) == n
+
+
+def test_markets_older_than_the_historical_cutoff_skip_the_batch(tmp_path, no_sleep):
+    markets = [ks.parse_settled_market(m) for m in LIVE_PAGE["markets"] + HIST_PAGE["markets"]]
+    entries = {e["market_ticker"]: e for e in LIVE_CANDLES["markets"]}
+    singles = {"KXBTC15M-26SEP071945-45": HIST_CANDLES["markets"][0]["candlesticks"],
+               "KXBTC15M-26SEP071930-30": HIST_CANDLES["markets"][0]["candlesticks"][:3]}
+    s = FakeSession(_routing_handler(entries, singles))
+    cutoff = ks._ts("2026-09-08T00:00:00Z")
+    ks.fetch_missing_candles(s, markets, str(tmp_path), historical_before=cutoff)
+    batch_tickers = {t for u, p in s.calls if u.endswith("/markets/candlesticks")
+                     for t in p["market_tickers"].split(",")}
+    assert batch_tickers == {"KXBTC15M-26NOV071845-45", "KXBTC15M-26NOV071830-30"}
+    assert len(ks.load_candles(str(tmp_path))["KXBTC15M-26SEP071930-30"]) == 3
+
+
+def test_threaded_fetch_writes_every_market_exactly_once(tmp_path, no_sleep):
+    markets = [{"ticker": f"OLD{i}", "open_ts": 1_000_000 + 900 * i, "close_ts": 1_000_900 + 900 * i}
+               for i in range(40)]
+    singles = {m["ticker"]: [{"end_period_ts": m["close_ts"], "yes_bid": {"close": "0.4"},
+                              "yes_ask": {"close": "0.5"}, "price": {"close": None}}] for m in markets}
+    handler = _routing_handler({}, singles)
+    sessions = []
+
+    def factory():
+        sessions.append(FakeSession(handler))
+        return sessions[-1]
+    n = ks.fetch_missing_candles(None, markets, str(tmp_path), historical_before=10 ** 10,
+                                 workers=4, session_factory=factory)
+    assert n == 40
+    lines = (tmp_path / "kalshi_candles.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 40 and {json.loads(x)["market_ticker"] for x in lines} == set(singles)
+    assert 1 <= len(sessions) <= 4
+
+
+def test_historical_cutoff_reads_market_settled_ts(no_sleep):
+    s = FakeSession(lambda u, p: FakeResponse(200, {"market_settled_ts": "2026-09-08T00:00:00Z",
+                                                    "trades_created_ts": "2026-09-08T00:00:00Z"}))
+    assert ks.historical_cutoff(s) == ks._ts("2026-09-08T00:00:00Z")

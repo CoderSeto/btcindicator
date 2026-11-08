@@ -50,8 +50,10 @@ fee_type "quadratic" (no maker fee) with fee_multiplier 1.
 
 Data: the live API lists settled markets from 2026-09-01; older ones are
 under /historical/markets (cutoff from GET /historical/cutoff). The batch
-endpoint GET /markets/candlesticks serves both, but caps one request at
-10,000 candlesticks counted as markets x minutes in the requested range.
+endpoint GET /markets/candlesticks caps one request at 10,000 candlesticks
+counted as markets x minutes in the requested range, and returned nothing
+for markets older than about 2026-08-31; those come one at a time from
+/historical/markets/{ticker}/candlesticks (see fetch_missing_candles).
 """
 import json
 import math
@@ -352,12 +354,14 @@ def log_loss(prob, outcome):
 
 # --- fetching and caching ----------------------------------------------------
 
-def _get(session, path: str, params: dict, retries: int = 6, pause: float = 0.12):
-    """GET with backoff on 429 / 5xx. Kalshi's public tier rate-limits bursts."""
+def _get(session, path: str, params: dict, retries: int = 8, pause: float = 0.12):
+    """GET with backoff on 429 / 5xx; None on 404. Kalshi's public tier rate-limits bursts."""
     url = f"{kalshi_api.BASE_URL}{path}"
     delay = 1.0
     for attempt in range(retries):
         resp = session.get(url, params=params, timeout=30)
+        if resp.status_code == 404:
+            return None
         if resp.status_code == 429 or resp.status_code >= 500:
             if attempt == retries - 1:
                 resp.raise_for_status()
@@ -457,33 +461,89 @@ def load_candles(cache_dir: str = CACHE_DIR) -> dict:
     return out
 
 
-def fetch_missing_candles(session, markets: list, cache_dir: str = CACHE_DIR, progress=None) -> int:
+def historical_cutoff(session):
+    """Epoch seconds before which settled markets live under /historical/ (None if unknown)."""
+    page = _get(session, "/historical/cutoff", {})
+    ts = (page or {}).get("market_settled_ts")
+    return _ts(ts) if ts else None
+
+
+def fetch_market_candles(session, m: dict) -> list:
+    """
+    One market's 1-minute candlesticks from the per-market endpoints: the
+    historical one first, then the live series one. [] only if both have none.
+    """
+    params = {"start_ts": m["open_ts"], "end_ts": m["close_ts"], "period_interval": 1}
+    for path in (f"/historical/markets/{m['ticker']}/candlesticks",
+                 f"/series/{SERIES}/markets/{m['ticker']}/candlesticks"):
+        page = _get(session, path, params)
+        if page and page.get("candlesticks"):
+            return page["candlesticks"]
+    return []
+
+
+def fetch_missing_candles(session, markets: list, cache_dir: str = CACHE_DIR, progress=None,
+                          historical_before: int = None, workers: int = 1, session_factory=None) -> int:
     """
     Fetches 1-minute candlesticks for every parsed market not yet cached and
     appends each market's raw entry to the cache as one JSON line, so an
     interrupted run resumes where it stopped. Returns how many were fetched.
+
+    Routing (both measured 2026-11-07): the batch endpoint returned nothing
+    for markets older than about 2026-08-31, though the per-market
+    /historical/ endpoint serves them. So markets closing before
+    `historical_before` (GET /historical/cutoff's market_settled_ts) go
+    straight to the per-market endpoints, the rest are batched, and any
+    market a batch omits is retried one at a time. A market is cached empty
+    only when every endpoint had nothing, never because a batch skipped it.
+    `workers` > 1 runs the per-market requests on that many threads, each
+    with its own session from `session_factory`.
     """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     _, path = _paths(cache_dir)
     have = set(load_candles(cache_dir))
     todo = [m for m in markets if m["ticker"] not in have]
-    batches = candle_batches(todo)
+    old = [m for m in todo if historical_before is not None and m["close_ts"] < historical_before]
+    new = [m for m in todo if not (historical_before is not None and m["close_ts"] < historical_before)]
     os.makedirs(cache_dir, exist_ok=True)
-    fetched = 0
+    lock = threading.Lock()
+    done = [0]
+
     with open(path, "a", encoding="utf-8") as f:
-        for i, (tickers, lo, hi) in enumerate(batches):
+        def write(t, cs):
+            with lock:
+                f.write(json.dumps({"market_ticker": t, "candlesticks": cs}) + "\n")
+                f.flush()
+                done[0] += 1
+                if progress:
+                    progress(done[0], len(todo))
+
+        singles = list(old)
+        for tickers, lo, hi in candle_batches(new):
             page = _get(session, "/markets/candlesticks", {
                 "market_tickers": ",".join(tickers), "start_ts": lo, "end_ts": hi, "period_interval": 1})
-            got = {e["market_ticker"]: e for e in page.get("markets", [])}
-            for t in tickers:
-                # A market missing from the response is cached empty, so it is
-                # counted as "no quote" rather than refetched forever.
-                e = got.get(t, {"market_ticker": t, "candlesticks": []})
-                f.write(json.dumps({"market_ticker": t, "candlesticks": e.get("candlesticks", [])}) + "\n")
-                fetched += 1
-            f.flush()
-            if progress:
-                progress(i + 1, len(batches))
-    return fetched
+            got = {e["market_ticker"]: e.get("candlesticks") for e in (page or {}).get("markets", [])}
+            for m in (m for m in new if m["ticker"] in set(tickers)):
+                if got.get(m["ticker"]):
+                    write(m["ticker"], got[m["ticker"]])
+                else:
+                    singles.append(m)
+
+        if workers <= 1 or session_factory is None:
+            for m in singles:
+                write(m["ticker"], fetch_market_candles(session, m))
+        else:
+            local = threading.local()
+
+            def one(m):
+                if not hasattr(local, "s"):
+                    local.s = session_factory()
+                write(m["ticker"], fetch_market_candles(local.s, m))
+            with ThreadPoolExecutor(workers) as pool:
+                list(pool.map(one, singles))
+    return done[0]
 
 
 # --- Step 3: Coinbase history, the model, the basis -----------------------------
