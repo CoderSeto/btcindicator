@@ -60,7 +60,10 @@ def ref_rsi(xs, p):
         diffs = [xs[k] - xs[k - 1] for k in range(t - p + 1, t + 1)]
         ag = sum(d for d in diffs if d > 0) / p
         al = sum(-d for d in diffs if d < 0) / p
-        out.append(50.0 if al == 0 else 100 - 100 / (1 + ag / al))
+        if al == 0:
+            out.append(100.0 if ag > 0 else 50.0)   # gains only: the limit as losses -> 0
+        else:
+            out.append(100 - 100 / (1 + ag / al))
     return out
 
 
@@ -132,9 +135,26 @@ def test_rsi_all_losses_is_zero():
     assert out.iloc[-1] == 0.0
 
 
-def test_rsi_all_gains_is_reported_as_neutral_50_not_100():
-    out = ind.add_rsi(frame([1, 2, 3, 4, 5, 6]), 3)["rsi"]
-    assert (out == 50.0).all()            # documented fallback: undefined RS -> neutral
+def test_rsi_all_gains_is_100_not_neutral():
+    # Known item 3: a one-way run is the most overbought case. It used to read 50 (neutral),
+    # so RSI never voted on it. Warm-up candles stay at 50.
+    out = ind.add_rsi(frame([1, 2, 3, 4, 5, 6]), 3)["rsi"].tolist()
+    assert out[:3] == [50.0] * 3 and out[3:] == [100.0] * 3
+
+
+def test_rsi_gains_with_flat_steps_and_no_loss_is_still_100():
+    out = ind.add_rsi(frame([5, 5, 6, 6, 7]), 3)["rsi"].tolist()
+    assert out[3:] == [100.0, 100.0]
+
+
+def test_a_one_way_run_votes_overbought():
+    # End to end: 14+ straight up-closes now cast RSI's bearish (overbought) vote.
+    import config as real_cfg
+    import signals
+    xs = [100 + 0.5 * i for i in range(80)]
+    df = ind.compute_all(frame(xs).assign(volume=10.0, open=xs, high=xs, low=xs), real_cfg)
+    assert df["rsi"].iloc[-1] == 100.0
+    assert signals.evaluate_price_only(df, real_cfg).individual["rsi"] == "bearish"
 
 
 def test_rsi_flat_series_is_50():
