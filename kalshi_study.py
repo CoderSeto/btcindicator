@@ -31,6 +31,14 @@ held-out data; add a variant instead and count it.
   - Selection: a cell is "selected" on train only if its Bonferroni interval
     lies entirely above zero; only selected cells are then scored on test,
     with a second Bonferroni correction over the number selected.
+  - Step 3 (added with its code, before any Step 3 output was seen): the
+    model is kalshi.settlement_probability with spot = the last Coinbase
+    trade before quote time and vol = realized vol of the prior
+    VOL_LOOKBACK_MIN minutes. Two spot variants (SPOT_SOURCES) x three edge
+    margins (EDGE_MARGINS) x three horizons = 18 trading variants, selected
+    and tested by the same rule as above, on mean profit per trade. Brier
+    and log-loss are compared with the market mid on the same rows, as a
+    paired difference with a day-block interval.
 
 Fees, verified 2026-11-07 against Kalshi's own fee schedule
 (kalshi.com/docs/kalshi-fee-schedule.pdf, "Last updated and effective: July
@@ -476,3 +484,199 @@ def fetch_missing_candles(session, markets: list, cache_dir: str = CACHE_DIR, pr
             if progress:
                 progress(i + 1, len(batches))
     return fetched
+
+
+# --- Step 3: Coinbase history, the model, the basis -----------------------------
+
+COINBASE_PRODUCT = "BTC-USD"
+COINBASE_CHUNK_MIN = 299            # data_fetch.MAX_CANDLE_SPAN: Coinbase caps a request at 300 buckets
+
+
+def _coinbase_day_path(cache_dir, day):
+    return os.path.join(cache_dir, "coinbase_1m", f"{day}.csv")
+
+
+def fetch_coinbase_day(day: str, fetch=None, pause: float = 0.15) -> pd.DataFrame:
+    """
+    Every 1-minute BTC-USD candle starting on UTC `day` (YYYY-MM-DD), in
+    COINBASE_CHUNK_MIN-minute requests, deduplicated, with integer `ts` (the
+    candle's start, epoch seconds). Coinbase omits minutes with no trades.
+    """
+    import data_fetch
+    fetch = fetch or data_fetch.get_candles_range
+    start = pd.Timestamp(day, tz="UTC")
+    end = start + pd.Timedelta(days=1)
+    parts = []
+    t = start
+    while t < end:
+        t2 = min(t + pd.Timedelta(minutes=COINBASE_CHUNK_MIN), end)
+        parts.append(fetch(COINBASE_PRODUCT, 60, t, t2))
+        t = t2
+        time.sleep(pause)
+    parts = [p for p in parts if not p.empty]
+    if not parts:
+        return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+    df = pd.concat(parts, ignore_index=True)
+    # Explicit ns resolution before the epoch conversion (gotcha #2).
+    ts = pd.to_datetime(df["time"]).values.astype("datetime64[ns]").astype("int64") // 1_000_000_000
+    df = df.assign(ts=ts)
+    lo, hi = int(start.timestamp()), int(end.timestamp())
+    df = df[(df.ts >= lo) & (df.ts < hi)].drop_duplicates("ts").sort_values("ts")
+    return df[["ts", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+
+
+def load_or_fetch_coinbase(first_ts: int, last_ts: int, cache_dir: str = CACHE_DIR, fetch=None,
+                           progress=None, today: str = None) -> pd.DataFrame:
+    """
+    1-minute BTC-USD candles covering [first_ts, last_ts], cached one CSV per
+    UTC day. Only complete past days are cached; today is always refetched.
+    """
+    days = pd.date_range(pd.to_datetime(first_ts, unit="s").normalize(),
+                         pd.to_datetime(last_ts, unit="s").normalize(), freq="D")
+    today = today or pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
+    os.makedirs(os.path.join(cache_dir, "coinbase_1m"), exist_ok=True)
+    frames = []
+    for i, d in enumerate(days):
+        day = d.strftime("%Y-%m-%d")
+        path = _coinbase_day_path(cache_dir, day)
+        if os.path.exists(path) and day < today:
+            frames.append(pd.read_csv(path))
+        else:
+            df = fetch_coinbase_day(day, fetch)
+            if day < today:
+                df.to_csv(path + ".tmp", index=False)
+                os.replace(path + ".tmp", path)
+            frames.append(df)
+        if progress:
+            progress(i + 1, len(days))
+    return pd.concat(frames, ignore_index=True).drop_duplicates("ts").sort_values("ts").reset_index(drop=True)
+
+
+class MinuteGrid:
+    """
+    1-minute candles on a gap-aware grid: row i is the candle starting at
+    t0 + 60 i, NaN where Coinbase had none, so "the candle before time t" is
+    an index lookup and a missing minute stays visibly missing.
+    """
+
+    def __init__(self, df: pd.DataFrame):
+        ts = df["ts"].to_numpy(dtype=np.int64)
+        if (ts % 60).any():
+            raise ValueError("candle starts must be whole minutes")
+        self.t0 = int(ts.min())
+        n = int((ts.max() - self.t0) // 60) + 1
+        idx = (ts - self.t0) // 60
+        self.cols = {}
+        for c in ("open", "high", "low", "close"):
+            a = np.full(n, np.nan)
+            a[idx] = df[c].to_numpy(dtype=float)
+            self.cols[c] = a
+
+    def _i(self, start_ts: int):
+        i = (int(start_ts) - self.t0) // 60
+        return i if 0 <= i < len(self.cols["close"]) else None
+
+    def last_close_before(self, t: int):
+        """Close of the candle covering [t - 60, t): the last trade before t."""
+        i = self._i(t - 60)
+        if i is None:
+            return None
+        v = self.cols["close"][i]
+        return None if np.isnan(v) else float(v)
+
+    def minute_average_before(self, t: int):
+        """
+        Proxy for a 60-second average ending at t: the mean of the open, high,
+        low and close of the candle covering [t - 60, t). A real 60-print
+        average needs per-second data this doesn't have.
+        """
+        i = self._i(t - 60)
+        if i is None:
+            return None
+        v = float(np.mean([self.cols[c][i] for c in ("open", "high", "low", "close")]))
+        return None if np.isnan(v) else v
+
+    def closes_before(self, t: int, count: int):
+        """The `count` closes of the candles ending at or before t (NaN where missing), oldest first."""
+        i = self._i(t - 60)
+        if i is None or i - count + 1 < 0:
+            return None
+        return self.cols["close"][i - count + 1: i + 1]
+
+
+def model_inputs(grid: MinuteGrid, t: int, lookback_min: int = VOL_LOOKBACK_MIN,
+                 min_candles: int = MIN_VOL_CANDLES):
+    """
+    (spot, annual_vol) as the live calculator would have had them at t: spot
+    is the last Coinbase trade before t, vol the realized vol of the
+    `lookback_min` one-minute returns ending at t (kalshi.realized_volatility,
+    the function the dashboard uses). Missing minutes inside the vol window
+    are carried forward if at least `min_candles` of its candles exist;
+    otherwise None, as when the spot minute itself is missing. Nothing from
+    after t is used.
+    """
+    spot = grid.last_close_before(t)
+    closes = grid.closes_before(t, lookback_min + 1)
+    if spot is None or closes is None or np.count_nonzero(~np.isnan(closes)) < min_candles:
+        return None
+    filled = pd.Series(closes).ffill().bfill()
+    vol = kalshi.realized_volatility(pd.DataFrame({"close": filled}), lookback_min, 60)["annual_vol"]
+    if vol is None:
+        return None
+    return spot, vol
+
+
+def model_observations(obs: pd.DataFrame, grid: MinuteGrid) -> pd.DataFrame:
+    """
+    Adds, per observation, the Coinbase spot and vol at quote time and two
+    model probabilities from kalshi.settlement_probability:
+      p_model     -- spot straight from Coinbase (what the dashboard does)
+      p_model_adj -- spot rescaled by strike / (Coinbase proxy for the strike's
+                     own 60s average at open), removing the Coinbase-vs-index
+                     basis as it stood at open. The strike is published at
+                     open, so this uses nothing from after quote time.
+    Also the basis at open and at close in basis points (Kalshi's index value
+    over the Coinbase proxy, minus 1). Rows the model can't price get NaN.
+    """
+    out = obs.copy()
+    spot, vol, p, p_adj, gap_open, gap_close = ([] for _ in range(6))
+    for r in obs.itertuples():
+        proxy_open = grid.minute_average_before(r.open_ts)
+        proxy_close = grid.minute_average_before(r.close_ts)
+        gap_open.append((r.strike / proxy_open - 1) * 1e4 if proxy_open else np.nan)
+        ev = r.expiration_value
+        gap_close.append((ev / proxy_close - 1) * 1e4 if proxy_close and ev == ev and ev else np.nan)
+        mi = model_inputs(grid, r.quote_ts)
+        if mi is None:
+            for col in (spot, vol, p, p_adj):
+                col.append(np.nan)
+            continue
+        s, v = mi
+        spot.append(s)
+        vol.append(v)
+        p.append(kalshi.settlement_probability(s, r.strike, r.horizon, v))
+        p_adj.append(kalshi.settlement_probability(s * r.strike / proxy_open, r.strike, r.horizon, v)
+                     if proxy_open else np.nan)
+    out["spot"], out["vol"], out["p_model"], out["p_model_adj"] = spot, vol, p, p_adj
+    out["basis_open_bp"], out["basis_close_bp"] = gap_open, gap_close
+    return out
+
+
+def model_trades(prob, bid, ask, outcome, margin: float = 0.0):
+    """
+    Trade toward the model when its edge over the price paid, net of the fee,
+    exceeds `margin`: buy YES at the ask if p - ask - fee(ask) > margin, buy NO
+    at 1 - bid if (1 - p) - (1 - bid) - fee(1 - bid) > margin, else nothing.
+    Returns (side, pnl): side +1 YES / -1 NO / 0 none, pnl NaN when no trade.
+    The two can't both fire, since ask > bid.
+    """
+    p = np.asarray(prob, dtype=float)
+    bid = np.asarray(bid, dtype=float)
+    ask = np.asarray(ask, dtype=float)
+    edge_yes = p - ask - taker_fee(ask)
+    edge_no = (1 - p) - (1 - bid) - taker_fee(1 - bid)
+    with np.errstate(invalid="ignore"):
+        side = np.where(edge_yes > margin, 1, np.where(edge_no > margin, -1, 0))
+    pnl = np.where(side == 1, ev_buy_yes(outcome, ask),
+                   np.where(side == -1, ev_buy_no(outcome, bid), np.nan))
+    return side, pnl
