@@ -39,3 +39,5 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+edge_record.csv
+edge_trades.csv

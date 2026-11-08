@@ -297,3 +297,18 @@ PAPER_AUTO_ENTRY_MINUTES = 5.0
 PAPER_AUTO_LAST_MINUTES = 2.0
 PAPER_AUTO_CONTRACTS = 1
 PAPER_AUTO_MODEL_MARGIN = 0.02
+
+# ---------------------------------------------------------------------------
+# Forward edge recorder (edge_recorder.py; EDGE_HYPOTHESES.md). Records the
+# live KXBTC15M quote next to spot, depth and flow once a second so the
+# pre-registered hypotheses can be tested on data none of them has seen.
+# Standalone script, no auth; off unless you run it.
+# ---------------------------------------------------------------------------
+EDGE_RECORD_PATH = "edge_record.csv"          # one row per tick (and one per gap)
+EDGE_TRADES_PATH = "edge_trades.csv"          # Kalshi prints, one row each, deduplicated by trade_id
+EDGE_TICK_SECONDS = 1.0                       # tick interval; Kalshi book is polled every tick
+EDGE_MARKET_REFRESH_SECONDS = 30.0            # how often the open-market list is re-fetched
+EDGE_TRADES_REFRESH_SECONDS = 5.0             # how often Kalshi prints are polled
+EDGE_VOL_REFRESH_SECONDS = 60.0               # how often the Coinbase vol window is re-fetched
+EDGE_GAP_SECONDS = 5.0                        # a tick-to-tick interval longer than this logs a gap row
+EDGE_LIQ_WINDOW_SECONDS = 30.0                # liquidation notional summed over this trailing window
