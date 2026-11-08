@@ -78,6 +78,11 @@ BYBIT_BOOK_DEPTH = 200
 # that persistence and flow are computed from, and how much of that
 # history to keep.
 BOOK_SAMPLE_INTERVAL_SECONDS = 1.0
+# A venue whose book hasn't changed for this long is left out of the sample.
+# Coinbase's level2_batch pushes every 50ms and the others push every change,
+# so 15s of silence on a BTC book is a frozen feed, not a quiet market. The
+# socket's ping timeout (~30s) used to be the only thing that removed one.
+BOOK_STALE_SECONDS = 15.0
 BOOK_HISTORY_SECONDS = 900
 
 # How much of each local book is kept when it's materialized for the

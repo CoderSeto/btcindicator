@@ -59,6 +59,14 @@ def _esc(text: str) -> str:
     return text.replace("$", r"\$")
 
 
+def _book_status(book_snapshot: dict) -> dict:
+    """Depth-feed status per venue, with a connected venue whose book stopped
+    changing shown as frozen: it's left out of the read (BOOK_STALE_SECONDS)."""
+    frozen = set(book_snapshot.get("frozen_venues", []))
+    return {v: ("frozen, not counted" if v in frozen else s)
+            for v, s in book_snapshot.get("status", {}).items()}
+
+
 def _venue_status(status: dict):
     """
     One compact row of connection dots. Both the depth feeds and the trade
@@ -567,13 +575,13 @@ with tab_book, st.container(height=TAB_BODY_HEIGHT, border=False):
         st.caption("Depth feeds not available for this pair.")
     elif not book_snapshot.get("available"):
         st.caption(f"Waiting on depth feeds -- {book_snapshot.get('reason', 'no book yet')}.")
-        _venue_status(book_snapshot.get("status", {}))
+        _venue_status(_book_status(book_snapshot))
     else:
         agg = book_snapshot["aggregate"]
         persistence = book_snapshot["persistence"]
         flow = book_snapshot["flow"]
 
-        _venue_status(book_snapshot["status"])
+        _venue_status(_book_status(book_snapshot))
 
         book_cols = st.columns(4)
         with book_cols[0]:

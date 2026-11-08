@@ -77,6 +77,8 @@ def make_book_snapshot(monkeypatch):
         agg.set_status(venue, "connected")
     for _ in range(60):
         clock["t"] += 1.0
+        for venue, shift in (("coinbase", 0.0), ("binance_us", 2.0)):    # live feeds keep sending:
+            agg.apply_changes(venue, [("bid", 75_699.99 + shift, 2.0)])  # a same-size refresh
         assert agg.sample() is not None
     snap = agg.snapshot()
     assert snap["available"] and any(w["held"] for w in snap["walls"])
@@ -929,3 +931,16 @@ def test_logged_predictions_record_the_ticker_spot(env):
     assert row["current_price"] == pytest.approx(75_712.34)
     want = kalshi.fair_value(env.df, 75_743.66, 7.5, cfg.KALSHI_VOL_LOOKBACK_MINUTES, current_price=75_712.34)
     assert row["p_yes"] == pytest.approx(want["p_yes"])
+
+
+def test_a_frozen_depth_venue_shows_as_frozen_not_connected(env):
+    # D12: a connected venue whose book stopped changing is left out of the read; the status row
+    # must say so rather than show it green.
+    go_live(env)
+    env.book_snapshot = {**env.book_snapshot, "frozen_venues": ["binance_us"]}
+    at = run()
+    no_exception(at)
+    row = [m.value for m in at.markdown if "binance_us" in m.value and "<b>" in m.value]
+    assert row and "frozen, not counted" in row[0] and "\U0001F534" in row[0]
+    coinbase = [m.value for m in at.markdown if "<b>coinbase</b>" in m.value]
+    assert coinbase and "\U0001F7E2" in coinbase[0]

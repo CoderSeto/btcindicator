@@ -295,6 +295,7 @@ class BookAggregator:
         self._latest_books = {}
         self._unavailable_reason = "no venue order book has connected yet"
         self._last_sample_ts = 0.0
+        self._frozen_venues = set()
         self._started_at = time.time()
 
     # -- writer side (called from feed threads) --
@@ -406,11 +407,18 @@ class BookAggregator:
         cfg = self.cfg
         now = time.time()
 
+        stale_after = getattr(cfg, "BOOK_STALE_SECONDS", None)
         with self._lock:
+            # A ready book that has stopped changing is a frozen feed (D12): it
+            # would keep voting with an old picture of the book until the socket
+            # timed out. Leave it out, and say so in the snapshot.
+            frozen = {venue for venue, lb in self._books.items()
+                      if lb.ready and stale_after is not None and now - lb.last_update_ts > stale_after}
+            self._frozen_venues = frozen
             books = {
                 venue: lb.materialize(cfg.BOOK_RETAIN_BPS)
                 for venue, lb in self._books.items()
-                if lb.ready
+                if lb.ready and venue not in frozen
             }
 
         per_venue = {venue: ob.book_metrics(b, cfg) for venue, b in books.items()}
@@ -649,6 +657,7 @@ class BookAggregator:
             uptime = now - self._started_at
             last_sample_ts = self._last_sample_ts
             reason = self._unavailable_reason
+            frozen = sorted(self._frozen_venues)
 
         # A sampler thread that has died would otherwise leave the last
         # good reading in place forever, looking live. Anything older than
@@ -666,6 +675,7 @@ class BookAggregator:
                 "status": status,
                 "uptime_seconds": uptime,
                 "samples": len(history),
+                "frozen_venues": frozen,
             }
 
         persistence = self._persistence(history)
@@ -684,6 +694,9 @@ class BookAggregator:
             "history_seconds": age,
             "uptime_seconds": uptime,
             "sampled_at": history[-1]["ts"],
+            # Venues connected but left out of the read because their book
+            # stopped changing (config.BOOK_STALE_SECONDS).
+            "frozen_venues": frozen,
         }
 
 
