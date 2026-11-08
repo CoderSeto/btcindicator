@@ -5,6 +5,13 @@ This is the developer-facing companion to README.md, which is user-facing
 (how to run the bot). This file is about how the code fits together, why
 certain things are the way they are, and what's already gone wrong once.
 
+## Output style (applies to every session)
+
+Tool calls and results only. No text between tool calls. No plans, recaps,
+explanations or summaries unless asked. Final reply: 5 lines or fewer. Ask a
+question only when blocked, in one line with a recommended default.
+Read with Grep, then Read with offset/limit; never re-read a file after editing it.
+
 ## What this is
 
 A BTC (and other pairs) technical-indicator bot with a Streamlit dashboard
