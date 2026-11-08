@@ -42,28 +42,35 @@ def detect_divergence(df: pd.DataFrame, lookback: int, order: int) -> dict:
     rsi = window["rsi"]
     price_highs, price_lows = _swing_points(price, order)
 
+    # Both patterns are looked for, and the one completed most recently wins.
+    # Checking bearish first and returning on it used to hide a newer bullish
+    # divergence whenever an older bearish one was still in the window (D13).
+    found = []
     if len(price_highs) >= 2:
         i1, i2 = price_highs[-2], price_highs[-1]
         if price.iloc[i2] > price.iloc[i1] and rsi.iloc[i2] < rsi.iloc[i1]:
-            return {
+            found.append((i2, {
                 "type": "bearish",
                 "detail": (
                     f"Price made a higher high (${price.iloc[i1]:,.0f} to ${price.iloc[i2]:,.0f}) "
                     f"while RSI made a lower high ({rsi.iloc[i1]:.0f} to {rsi.iloc[i2]:.0f}) -- "
                     "upward momentum looks like it's fading."
                 ),
-            }
+            }))
 
     if len(price_lows) >= 2:
         i1, i2 = price_lows[-2], price_lows[-1]
         if price.iloc[i2] < price.iloc[i1] and rsi.iloc[i2] > rsi.iloc[i1]:
-            return {
+            found.append((i2, {
                 "type": "bullish",
                 "detail": (
                     f"Price made a lower low (${price.iloc[i1]:,.0f} to ${price.iloc[i2]:,.0f}) "
                     f"while RSI made a higher low ({rsi.iloc[i1]:.0f} to {rsi.iloc[i2]:.0f}) -- "
                     "downward momentum looks like it's fading."
                 ),
-            }
+            }))
 
+    if found:
+        # A swing index can't be both a strict high and a strict low, so no ties.
+        return max(found, key=lambda f: f[0])[1]
     return {"type": None, "detail": "No clear divergence in the recent window."}
