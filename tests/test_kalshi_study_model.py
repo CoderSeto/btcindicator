@@ -55,6 +55,21 @@ def test_model_inputs_match_an_independent_realized_vol():
     assert vol == pytest.approx(r.std(ddof=1) * math.sqrt(365.25 * 24 * 60), rel=1e-12)
 
 
+def test_coinbase_spot_comes_from_the_candle_that_ended_at_quote_time_never_the_one_starting_then():
+    # Hand-built: Coinbase stamps a candle with its START. Candles start at
+    # t-120, t-60 and t; only the first two have ended by t.
+    t = T0 + 3600
+    df = pd.DataFrame({"ts": [t - 120, t - 60, t], "open": [1.0, 2.0, 3.0], "high": [1.0, 2.0, 3.0],
+                       "low": [1.0, 2.0, 3.0], "close": [10.0, 20.0, 30.0], "volume": 1.0})
+    g = ks.MinuteGrid(df)
+    assert g.last_close_before(t) == 20.0                 # [t-60, t), not [t, t+60)
+    assert g.minute_average_before(t) == pytest.approx((2 + 2 + 2 + 20) / 4)
+    assert list(g.closes_before(t, 2)) == [10.0, 20.0]
+    # Without the candle that ended at t: no spot, rather than the one starting at t.
+    g2 = ks.MinuteGrid(df[df.ts != t - 60])
+    assert g2.last_close_before(t) is None
+
+
 def test_model_inputs_use_nothing_from_after_quote_time():
     px = walk(400, seed=2)
     t = T0 + 60 * 300
@@ -110,14 +125,15 @@ def test_rows_the_model_cannot_price_are_nan_not_dropped():
 # --- trading toward the model --------------------------------------------------------
 
 def test_model_trades_buy_the_side_with_edge_after_costs():
-    side, pnl = ks.model_trades(prob=[0.70, 0.30, 0.50, 0.70],
-                                bid=[0.55, 0.55, 0.49, 0.55], ask=[0.56, 0.56, 0.51, 0.56],
-                                outcome=[1, 1, 1, 0])
-    assert list(side) == [1, -1, 0, 1]
-    assert pnl[0] == pytest.approx(ks.ev_buy_yes(1, 0.56))
-    assert pnl[1] == pytest.approx(ks.ev_buy_no(1, 0.55))
-    assert np.isnan(pnl[2])
-    assert pnl[3] == pytest.approx(ks.ev_buy_yes(0, 0.56))
+    for c in ks.ORDER_SIZES:
+        side, pnl = ks.model_trades(prob=[0.70, 0.30, 0.50, 0.70],
+                                    bid=[0.55, 0.55, 0.49, 0.55], ask=[0.56, 0.56, 0.51, 0.56],
+                                    outcome=[1, 1, 1, 0], margin=0.0, contracts=c)
+        assert list(side) == [1, -1, 0, 1]
+        assert pnl[0] == pytest.approx(ks.ev_buy_yes(1, 0.56, c))
+        assert pnl[1] == pytest.approx(ks.ev_buy_no(1, 0.55, c))
+        assert np.isnan(pnl[2])
+        assert pnl[3] == pytest.approx(ks.ev_buy_yes(0, 0.56, c))
 
 
 def test_a_margin_only_removes_trades():
@@ -126,15 +142,22 @@ def test_a_margin_only_removes_trades():
     bid = rng.uniform(0.02, 0.9, 2000)
     ask = bid + 0.01
     y = rng.random(2000) < p
-    s0, _ = ks.model_trades(p, bid, ask, y, 0.0)
-    s5, _ = ks.model_trades(p, bid, ask, y, 0.05)
+    s0, _ = ks.model_trades(p, bid, ask, y, 0.0, 100)
+    s5, _ = ks.model_trades(p, bid, ask, y, 0.05, 100)
     assert ((s5 != 0) <= (s0 != 0)).all() and (s5[s5 != 0] == s0[s5 != 0]).all()
 
 
 def test_an_edge_smaller_than_the_fee_does_not_trade():
-    # p exceeds the ask by 1 cent, but the fee at 0.50 is 1.75 cents.
-    side, _ = ks.model_trades([0.51], [0.49], [0.50], [1])
-    assert side[0] == 0
+    # p exceeds the ask by 1 cent, but the fee at 0.50 is 1.75 cents (100) or 2 (1).
+    for c in ks.ORDER_SIZES:
+        side, _ = ks.model_trades([0.51], [0.49], [0.50], [1], 0.0, c)
+        assert side[0] == 0
+
+
+def test_the_order_size_decides_a_marginal_trade():
+    # Edge 1.8c over the ask at 0.50: covers the 1.75c fee of 100 contracts, not the 2c of one.
+    assert ks.model_trades([0.518], [0.49], [0.50], [1], 0.0, 100)[0][0] == 1
+    assert ks.model_trades([0.518], [0.49], [0.50], [1], 0.0, 1)[0][0] == 0
 
 
 # --- Coinbase cache --------------------------------------------------------------
@@ -159,6 +182,20 @@ def test_a_day_is_fetched_in_chunks_without_gaps_or_duplicates():
     assert (np.diff(df.ts) == 60).all() and df.ts.iloc[0] == T0
     assert (df.close == df.ts).all()
     assert len(calls) == math.ceil(1440 / ks.COINBASE_CHUNK_MIN)
+
+
+def test_the_current_day_is_fetched_only_up_to_now():
+    # Coinbase answers 400 to a range ending in the future.
+    calls = []
+
+    def f(*a):
+        calls.append(a)
+        return fake_range(*a)
+    day = pd.to_datetime(T0, unit="s").strftime("%Y-%m-%d")
+    now = pd.Timestamp(T0 + 3 * 3600 + 30, unit="s", tz="UTC")
+    df = ks.fetch_coinbase_day(day, f, pause=0, now=now)
+    assert max(pd.Timestamp(a[3]) for a in calls) <= now
+    assert df.ts.max() < T0 + 3 * 3600 + 30
 
 
 def test_past_days_are_cached_and_today_is_always_refetched(tmp_path, monkeypatch):

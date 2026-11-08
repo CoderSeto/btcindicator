@@ -58,23 +58,30 @@ FEE_TABLE = [
 
 
 @pytest.mark.parametrize("price,one,hundred", FEE_TABLE)
-def test_taker_fee_reproduces_kalshis_published_table(price, one, hundred):
-    def to_cent(x):
-        return math.ceil(round(x * 100, 9)) / 100
-    assert to_cent(ks.taker_fee(price, 1)) == pytest.approx(one)
-    assert to_cent(ks.taker_fee(price, 100)) == pytest.approx(hundred)
+def test_order_fee_reproduces_kalshis_published_table(price, one, hundred):
+    assert ks.order_fee(price, 1) == pytest.approx(one)
+    assert ks.order_fee(price, 100) == pytest.approx(hundred)
 
 
-def test_buying_yes_pays_the_ask_and_the_fee():
-    # YES at 0.60 that settles YES: +0.40 less 0.07*0.6*0.4 = 0.0168
-    assert ks.ev_buy_yes(1, 0.60) == pytest.approx(0.40 - 0.0168)
-    assert ks.ev_buy_yes(0, 0.60) == pytest.approx(-0.60 - 0.0168)
+def test_the_fee_rounds_up_per_order_so_small_orders_pay_more_per_contract():
+    assert ks.fee_per_contract(0.50, 1) == pytest.approx(0.02)
+    assert ks.fee_per_contract(0.50, 100) == pytest.approx(0.0175)       # not 0.0176: float residue
+    assert ks.fee_per_contract(0.01, 1) == pytest.approx(0.01)            # 0.07c rounds to a whole cent
+    assert ks.fee_per_contract(0.01, 100) == pytest.approx(0.0007)
+
+
+def test_buying_yes_pays_the_ask_and_the_rounded_fee():
+    # YES at 0.60: 100 contracts pay $1.68, 1 contract pays $0.02.
+    assert ks.ev_buy_yes(1, 0.60, 100) == pytest.approx(0.40 - 0.0168)
+    assert ks.ev_buy_yes(0, 0.60, 100) == pytest.approx(-0.60 - 0.0168)
+    assert ks.ev_buy_yes(1, 0.60, 1) == pytest.approx(0.40 - 0.02)
 
 
 def test_buying_no_pays_one_minus_the_bid_and_the_fee_on_that_price():
-    # bid 0.58 -> NO costs 0.42, fee 0.07*0.42*0.58 = 0.017052
-    assert ks.ev_buy_no(0, 0.58) == pytest.approx(0.58 - 0.017052)
-    assert ks.ev_buy_no(1, 0.58) == pytest.approx(-0.42 - 0.017052)
+    # bid 0.58 -> NO costs 0.42; 100 contracts: 0.07*100*0.42*0.58 = 1.7052 -> $1.71
+    assert ks.ev_buy_no(0, 0.58, 100) == pytest.approx(0.58 - 0.0171)
+    assert ks.ev_buy_no(1, 0.58, 100) == pytest.approx(-0.42 - 0.0171)
+    assert ks.ev_buy_no(0, 0.58, 1) == pytest.approx(0.58 - 0.02)
 
 
 def test_holding_both_sides_always_loses_the_spread_and_two_fees():
@@ -82,9 +89,10 @@ def test_holding_both_sides_always_loses_the_spread_and_two_fees():
     bid = rng.uniform(0.01, 0.95, 500)
     ask = bid + rng.uniform(0.001, 0.04, 500)
     for outcome in (0, 1):
-        both = ks.ev_buy_yes(outcome, ask) + ks.ev_buy_no(outcome, bid)
-        assert np.allclose(both, (bid - ask) - ks.taker_fee(ask) - ks.taker_fee(1 - bid))
-        assert (both < 0).all()
+        for c in ks.ORDER_SIZES:
+            both = ks.ev_buy_yes(outcome, ask, c) + ks.ev_buy_no(outcome, bid, c)
+            assert np.allclose(both, (bid - ask) - ks.fee_per_contract(ask, c) - ks.fee_per_contract(1 - bid, c))
+            assert (both < 0).all()
 
 
 @pytest.mark.parametrize("bid,ask,ok", [
@@ -141,6 +149,26 @@ def test_candles_also_accept_bare_close_keys():
     c = ks.parse_candles([{"end_period_ts": 60, "yes_bid": {"close": "0.4600"},
                            "yes_ask": {"close": "0.4700"}, "price": {"close": None}}])
     assert c == {60: (0.46, 0.47, None)}
+
+
+def test_the_quote_at_a_horizon_comes_from_the_candle_ending_then_never_a_later_one():
+    # Hand-built: candles end at t-60, t and t+60 with distinct quotes. Kalshi
+    # stamps a candle with the END of its period, (end-60, end].
+    t = 1_800_000_000
+    raw = [{"end_period_ts": e, "yes_bid": {"close_dollars": b}, "yes_ask": {"close_dollars": a},
+            "price": {"close_dollars": b}}
+           for e, b, a in [(t - 60, "0.10", "0.11"), (t, "0.20", "0.21"), (t + 60, "0.90", "0.91")]]
+    c = ks.parse_candles(raw)
+    assert ks.quote_at(c, t) == (0.20, 0.21, 0.20)
+    # Without the candle ending at t there is no quote: not the t+60 one
+    # (look-ahead), not the t-60 one (stale).
+    del c[t]
+    assert ks.quote_at(c, t) is None
+    m = {"ticker": "X", "open_ts": t - 300, "close_ts": t + 600, "strike": 1.0,
+         "expiration_value": 1.0, "outcome": 1}
+    obs = ks.observations([m], {"X": ks.parse_candles(raw)}, horizons=(10,))
+    assert obs.quote_ts.iloc[0] == t and (obs.bid.iloc[0], obs.ask.iloc[0]) == (0.20, 0.21)
+    assert (obs.quote_ts <= obs.close_ts - 60 * obs.horizon).all()
 
 
 def _fixture_markets():
@@ -212,11 +240,13 @@ def test_bucket_table_reports_the_yes_rate_and_net_ev_per_bucket():
         "outcome": [1, 0, 1, 1, 1],
         "day": ["a", "b", "a", "b", "a"],
     })
-    t = ks.bucket_table(obs, z=2.0, resamples=200).set_index("bucket")
+    t = ks.bucket_table(obs, z=2.0, contracts=100, resamples=200).set_index("bucket")
     assert list(t.index) == ["0.1-0.2", "0.8-0.9"]                   # the invalid row is dropped
     assert t.loc["0.1-0.2", "yes_rate"] == pytest.approx(0.5)
-    assert t.loc["0.1-0.2", "ev_yes"] == pytest.approx(0.5 - 0.16 - 0.07 * 0.16 * 0.84)
-    assert t.loc["0.8-0.9", "ev_no"] == pytest.approx(-0.15 - 0.07 * 0.15 * 0.85)
+    assert t.loc["0.1-0.2", "ev_yes"] == pytest.approx(0.5 - 0.16 - 0.0095)     # $0.9408 -> $0.95 / 100
+    assert t.loc["0.8-0.9", "ev_no"] == pytest.approx(-0.15 - 0.009)            # $0.8925 -> $0.90 / 100
+    t1 = ks.bucket_table(obs, z=2.0, contracts=1, resamples=200).set_index("bucket")
+    assert t1.loc["0.1-0.2", "ev_yes"] == pytest.approx(0.5 - 0.16 - 0.01)
 
 
 def test_calibration_fit_recovers_known_coefficients():
@@ -251,6 +281,43 @@ def test_calibration_fit_is_at_the_likelihood_maximum():
     best = ll(a, b)
     for da, db in [(1e-3, 0), (-1e-3, 0), (0, 1e-3), (0, -1e-3)]:
         assert ll(a + da, b + db) < best
+
+
+def test_exclusions_count_missing_and_bad_books_per_month_and_by_outcome():
+    obs = pd.DataFrame({
+        "day": ["2026-01-05"] * 4 + ["2026-02-03"] * 2,
+        "horizon": [5] * 6,
+        "bid": [0.4, np.nan, 0.0, 0.5, 0.3, 0.3],
+        "ask": [0.41, np.nan, 1.0, 0.51, 0.31, 0.31],
+        "outcome": [1, 1, 0, 0, 1, 0],
+    })
+    obs["valid"] = ks.valid_book(obs.bid, obs.ask)
+    t = ks.exclusions(obs).set_index("month")
+    jan = t.loc["2026-01"]
+    assert (jan.contracts, jan.no_quote, jan.bad_book) == (4, 1, 1)
+    assert jan.excl_rate_yes == pytest.approx(0.5) and jan.excl_rate_no == pytest.approx(0.5)
+    assert t.loc["2026-02", "excluded_rate"] == 0
+
+
+def test_exclusion_gap_detects_missingness_that_depends_on_the_outcome():
+    rng = np.random.default_rng(7)
+    n = 6000
+    y = rng.random(n) < 0.5
+    excluded = rng.random(n) < np.where(y, 0.20, 0.10)                  # YES dropped twice as often
+    obs = pd.DataFrame({"outcome": y.astype(int), "valid": ~excluded,
+                        "day": np.repeat(np.arange(200), 30).astype(str)})
+    g = ks.exclusion_outcome_gap(obs, resamples=500)
+    assert g["gap"] == pytest.approx(0.10, abs=0.02)
+    assert g["gap"] / g["se"] > 5
+    flat = obs.assign(valid=rng.random(n) >= 0.15)
+    g0 = ks.exclusion_outcome_gap(flat, resamples=500)
+    assert abs(g0["gap"] / g0["se"]) < 3
+
+
+def test_the_family_counts_every_test_in_both_steps():
+    assert ks.STEP2_TESTS == 3 * 10 * 2 * 2
+    assert ks.STEP3_TRADING_TESTS == 2 * 3 * 3 * 2
+    assert ks.TOTAL_TESTS == 120 + 36 + 12
 
 
 def test_brier_and_log_loss():

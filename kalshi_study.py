@@ -39,11 +39,22 @@ held-out data; add a variant instead and count it.
     and tested by the same rule as above, on mean profit per trade. Brier
     and log-loss are compared with the market mid on the same rows, as a
     paired difference with a day-block interval.
+  - Amendment, made at review before any outcome had been looked at (only
+    raw quotes had been seen): the fee is rounded up to the cent PER ORDER,
+    as in the table printed in Kalshi's schedule, so a 1-contract order at
+    50c pays 2c and a 100-contract order 1.75c a contract. Both order sizes
+    (ORDER_SIZES) are reported in full, as separate variants; neither is
+    chosen by its results. Every interval in both steps uses one Bonferroni
+    z over the TOTAL number of tests in Steps 2 and 3 (TOTAL_TESTS), not a
+    per-step count. Fills at the quoted top of book are assumed; candlesticks
+    carry no depth, so the size really available there may be smaller.
 
 Fees, verified 2026-11-07 against Kalshi's own fee schedule
 (kalshi.com/docs/kalshi-fee-schedule.pdf, "Last updated and effective: July
-7, 2026"): "fees = round up(M x 0.07 x C x P x (1-P))", rounded "such that
-the fee + positionCost is rounded to a centicent"; maker fees apply only to
+7, 2026"): "fees = round up(M x 0.07 x C x P x (1-P))". Its text says the
+round-up is "such that the fee + positionCost is rounded to a centicent",
+but the table on the next page rounds each order to the cent ($0.02 for one
+contract at $0.50); this uses the cent, the costlier reading. Maker fees apply only to
 series listed with a maker multiplier; "There is no settlement fee."
 KXBTC15M is not on the non-standard list, and GET /series/KXBTC15M reports
 fee_type "quadratic" (no maker fee) with fee_multiplier 1.
@@ -80,6 +91,7 @@ BOOTSTRAP_RESAMPLES = 2000
 BOOTSTRAP_SEED = 20261107
 TAKER_FEE_RATE = 0.07
 FEE_MULTIPLIER = 1.0
+ORDER_SIZES = (1, 100)              # contracts per order; the fee rounds up per order
 
 # Step 3
 VOL_LOOKBACK_MIN = 120              # same window as the live calculator
@@ -87,6 +99,12 @@ MIN_VOL_CANDLES = 110               # of the 121 one-minute candles the vol wind
 SPOT_SOURCES = ("coinbase", "basis_adjusted")
 EDGE_MARGINS = (0.0, 0.02, 0.05)   # extra edge, beyond costs, required to trade
 LOGLOSS_EPS = 1e-4
+
+# Every test in the study, counted once (see the amendment above).
+STEP2_TESTS = len(HORIZONS_MIN) * (len(BUCKET_EDGES) - 1) * 2 * len(ORDER_SIZES)       # bucket x side x size
+STEP3_TRADING_TESTS = len(SPOT_SOURCES) * len(EDGE_MARGINS) * len(HORIZONS_MIN) * len(ORDER_SIZES)
+STEP3_SCORING_TESTS = len(HORIZONS_MIN) * 2 * 2                                         # 2 models x Brier/log-loss
+TOTAL_TESTS = STEP2_TESTS + STEP3_TRADING_TESTS + STEP3_SCORING_TESTS
 
 MAX_BATCH_CANDLES = 10_000          # Kalshi's per-request cap (its own error message)
 CACHE_DIR = "study_data"
@@ -96,25 +114,39 @@ CACHE_DIR = "study_data"
 
 def taker_fee(price, contracts: float = 1.0, multiplier: float = FEE_MULTIPLIER, rate: float = TAKER_FEE_RATE):
     """
-    Kalshi's taker fee in dollars for `contracts` contracts at `price`, before
-    the centicent round-up (worth at most $0.0001 per order, so it is left out
-    of per-contract expected values). 1.75 cents a contract at 50 cents, 0.63 at
-    10 or 90 cents. Works elementwise on arrays.
+    Kalshi's taker fee formula in dollars for `contracts` contracts at
+    `price`, BEFORE the per-order round-up (see order_fee). Elementwise.
     """
     p = np.asarray(price, dtype=float)
     return multiplier * rate * contracts * p * (1.0 - p)
 
 
-def ev_buy_yes(outcome, ask):
-    """Profit per contract of buying YES at the ask: pays 1 on YES."""
+def order_fee(price, contracts: int):
+    """
+    The fee actually charged on one order of `contracts` at `price`: the
+    formula rounded UP to the cent, per order, as in Kalshi's printed table.
+    One contract at 50c pays 2c; 100 pay $1.75. The 1e-6 rounding first stops
+    float residue (0.07*100*0.25 = 1.7500000000000002) from adding a cent.
+    """
+    raw = np.asarray(taker_fee(price, contracts), dtype=float)
+    return np.ceil(np.round(raw * 100, 6)) / 100
+
+
+def fee_per_contract(price, contracts: int):
+    """order_fee spread over the order's contracts."""
+    return order_fee(price, contracts) / contracts
+
+
+def ev_buy_yes(outcome, ask, contracts: int):
+    """Profit per contract of buying YES at the ask in orders of `contracts`: pays 1 on YES."""
     ask = np.asarray(ask, dtype=float)
-    return np.asarray(outcome, dtype=float) - ask - taker_fee(ask)
+    return np.asarray(outcome, dtype=float) - ask - fee_per_contract(ask, contracts)
 
 
-def ev_buy_no(outcome, bid):
-    """Profit per contract of buying NO at 1 - bid (selling YES at the bid): pays 1 on NO."""
+def ev_buy_no(outcome, bid, contracts: int):
+    """Profit per contract of buying NO at 1 - bid (selling YES at the bid) in orders of `contracts`."""
     cost = 1.0 - np.asarray(bid, dtype=float)
-    return (1.0 - np.asarray(outcome, dtype=float)) - cost - taker_fee(cost)
+    return (1.0 - np.asarray(outcome, dtype=float)) - cost - fee_per_contract(cost, contracts)
 
 
 def valid_book(bid, ask):
@@ -184,7 +216,12 @@ def parse_candles(candlesticks: list) -> dict:
 
 
 def quote_at(candles: dict, ts: int):
-    """The (bid, ask, last) standing at `ts`, or None when no candle ends exactly then."""
+    """
+    The (bid, ask, last) standing at `ts`: the closing quote of the candle
+    whose period ENDS at `ts`, covering (ts - 60, ts]. None when no candle ends
+    exactly then -- never the next candle, which ends after `ts` and would be
+    look-ahead, and never an earlier one, which would be a stale quote.
+    """
     return candles.get(int(ts))
 
 
@@ -272,19 +309,19 @@ def bucket_of(mid, edges=BUCKET_EDGES):
     return np.clip(idx, 0, len(edges) - 2)
 
 
-def bucket_table(obs: pd.DataFrame, z: float, edges=BUCKET_EDGES, **boot) -> pd.DataFrame:
+def bucket_table(obs: pd.DataFrame, z: float, contracts: int, edges=BUCKET_EDGES, **boot) -> pd.DataFrame:
     """
     Per mid bucket (valid quotes only): mean mid, realized YES rate, and the
     mean net profit per contract of buying YES at the ask and of buying NO at
-    1 - bid, each with a +/- z block-bootstrap interval.
+    1 - bid in orders of `contracts`, each with a +/- z block-bootstrap interval.
     """
     d = obs[obs["valid"]].copy()
     d["bucket"] = bucket_of(d["mid"], edges)
     rows = []
     for b, g in d.groupby("bucket"):
         yes = block_bootstrap(g["outcome"], g["day"], **boot)
-        ev_y = block_bootstrap(ev_buy_yes(g["outcome"], g["ask"]), g["day"], **boot)
-        ev_n = block_bootstrap(ev_buy_no(g["outcome"], g["bid"]), g["day"], **boot)
+        ev_y = block_bootstrap(ev_buy_yes(g["outcome"], g["ask"], contracts), g["day"], **boot)
+        ev_n = block_bootstrap(ev_buy_no(g["outcome"], g["bid"], contracts), g["day"], **boot)
         rows.append({
             "bucket": f"{edges[b]:.1f}-{edges[b + 1]:.1f}",
             "n": len(g),
@@ -297,6 +334,51 @@ def bucket_table(obs: pd.DataFrame, z: float, edges=BUCKET_EDGES, **boot) -> pd.
             "n_eff": ev_y["n_eff"],
         })
     return pd.DataFrame(rows)
+
+
+def exclusions(obs: pd.DataFrame) -> pd.DataFrame:
+    """
+    Per month and horizon: contracts, how many were excluded for having no
+    candle at that exact minute or for failing the real-book filter, and the
+    exclusion rate among contracts that settled YES vs NO. If exclusion is
+    related to the outcome, the buckets describe a biased subset.
+    """
+    d = obs.copy()
+    d["month"] = d["day"].str[:7]
+    d["no_quote"] = d["bid"].isna() | d["ask"].isna()
+    d["bad_book"] = ~d["no_quote"] & ~d["valid"]
+    d["excluded"] = ~d["valid"]
+    rows = []
+    for (month, h), g in d.groupby(["month", "horizon"]):
+        yes, no = g[g.outcome == 1], g[g.outcome == 0]
+        rows.append({"month": month, "horizon": h, "contracts": len(g),
+                     "no_quote": int(g.no_quote.sum()), "bad_book": int(g.bad_book.sum()),
+                     "excluded_rate": float(g.excluded.mean()),
+                     "excl_rate_yes": float(yes.excluded.mean()) if len(yes) else float("nan"),
+                     "excl_rate_no": float(no.excluded.mean()) if len(no) else float("nan")})
+    return pd.DataFrame(rows)
+
+
+def exclusion_outcome_gap(obs: pd.DataFrame, **boot) -> dict:
+    """
+    Exclusion rate among YES-settled minus among NO-settled contracts, with a
+    day-block bootstrap SE: each day's YES and NO groups are resampled together.
+    """
+    d = obs.copy()
+    exc = (~d["valid"]).astype(float).to_numpy()
+    y = d["outcome"].to_numpy() == 1
+    labels, inv = np.unique(d["day"].to_numpy(), return_inverse=True)
+    k = len(labels)
+    ey = np.bincount(inv, weights=exc * y, minlength=k)
+    ny = np.bincount(inv, weights=y.astype(float), minlength=k)
+    en = np.bincount(inv, weights=exc * ~y, minlength=k)
+    nn = np.bincount(inv, weights=(~y).astype(float), minlength=k)
+    gap = ey.sum() / ny.sum() - en.sum() / nn.sum()
+    rng = np.random.default_rng(boot.get("seed", BOOTSTRAP_SEED))
+    idx = rng.integers(0, k, size=(boot.get("resamples", BOOTSTRAP_RESAMPLES), k))
+    draws = ey[idx].sum(1) / ny[idx].sum(1) - en[idx].sum(1) / nn[idx].sum(1)
+    return {"rate_yes": float(ey.sum() / ny.sum()), "rate_no": float(en.sum() / nn.sum()),
+            "gap": float(gap), "se": float(draws.std(ddof=1))}
 
 
 def _logit(p):
@@ -556,16 +638,19 @@ def _coinbase_day_path(cache_dir, day):
     return os.path.join(cache_dir, "coinbase_1m", f"{day}.csv")
 
 
-def fetch_coinbase_day(day: str, fetch=None, pause: float = 0.15) -> pd.DataFrame:
+def fetch_coinbase_day(day: str, fetch=None, pause: float = 0.15, now=None) -> pd.DataFrame:
     """
     Every 1-minute BTC-USD candle starting on UTC `day` (YYYY-MM-DD), in
     COINBASE_CHUNK_MIN-minute requests, deduplicated, with integer `ts` (the
     candle's start, epoch seconds). Coinbase omits minutes with no trades.
+    On the current day it stops at `now`: Coinbase answers HTTP 400 to a
+    range that ends in the future.
     """
     import data_fetch
     fetch = fetch or data_fetch.get_candles_range
     start = pd.Timestamp(day, tz="UTC")
-    end = start + pd.Timedelta(days=1)
+    now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    end = min(start + pd.Timedelta(days=1), now)
     parts = []
     t = start
     while t < end:
@@ -722,21 +807,23 @@ def model_observations(obs: pd.DataFrame, grid: MinuteGrid) -> pd.DataFrame:
     return out
 
 
-def model_trades(prob, bid, ask, outcome, margin: float = 0.0):
+def model_trades(prob, bid, ask, outcome, margin: float, contracts: int):
     """
     Trade toward the model when its edge over the price paid, net of the fee,
     exceeds `margin`: buy YES at the ask if p - ask - fee(ask) > margin, buy NO
     at 1 - bid if (1 - p) - (1 - bid) - fee(1 - bid) > margin, else nothing.
+    The fee is the per-contract share of an order of `contracts`.
     Returns (side, pnl): side +1 YES / -1 NO / 0 none, pnl NaN when no trade.
     The two can't both fire, since ask > bid.
     """
     p = np.asarray(prob, dtype=float)
     bid = np.asarray(bid, dtype=float)
     ask = np.asarray(ask, dtype=float)
-    edge_yes = p - ask - taker_fee(ask)
-    edge_no = (1 - p) - (1 - bid) - taker_fee(1 - bid)
+    with np.errstate(invalid="ignore"):
+        edge_yes = p - ask - fee_per_contract(ask, contracts)
+        edge_no = (1 - p) - (1 - bid) - fee_per_contract(1 - bid, contracts)
     with np.errstate(invalid="ignore"):
         side = np.where(edge_yes > margin, 1, np.where(edge_no > margin, -1, 0))
-    pnl = np.where(side == 1, ev_buy_yes(outcome, ask),
-                   np.where(side == -1, ev_buy_no(outcome, bid), np.nan))
+    pnl = np.where(side == 1, ev_buy_yes(outcome, ask, contracts),
+                   np.where(side == -1, ev_buy_no(outcome, bid, contracts), np.nan))
     return side, pnl
