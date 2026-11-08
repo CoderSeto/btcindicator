@@ -380,6 +380,25 @@ def test_load_state_survives_a_failed_ticker_and_flags_the_fallback(tmp_path, ne
     assert st.live_price_source == "candles" and "429" in st.live_price_note
 
 
+def test_the_three_requests_overlap_instead_of_queueing(tmp_path, monkeypatch):
+    import threading
+    import time
+    arrived = threading.Barrier(3, timeout=5)   # only passes if all three are in flight together
+
+    def slow(result):
+        def f(*a, **k):
+            arrived.wait()
+            return result
+        return f
+    monkeypatch.setattr(data_fetch, "get_candles", slow(candles()))
+    monkeypatch.setattr(data_fetch, "get_order_book", slow(REST_BOOK))
+    monkeypatch.setattr(data_fetch, "get_ticker", lambda p: (arrived.wait(), TICKER)[1])
+    t0 = time.perf_counter()
+    st = dashboard_data.load_state(make_cfg(tmp_path))
+    assert st.error is None and st.live_price_source == "ticker"
+    assert time.perf_counter() - t0 < 4
+
+
 # ---------- get_candles always asks for a range, never the CDN-cached bare URL ----------
 # From the user's machine, 2026-11-07, 23:44:08 UTC: `/candles?granularity=60` came back
 # `cf-cache-status: HIT, age: 113, cache-control: public, max-age=300` with newest candle 23:42,

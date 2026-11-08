@@ -10,6 +10,7 @@ This is a monitoring/alerting tool -- it does NOT place any real trades. The
 Paper trading tab simulates Kalshi orders only (see paper_trading.py).
 """
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -264,7 +265,15 @@ st.markdown(
 )
 
 # --- Load data ---
-state = load_state(cfg, feed_snapshot=feed_snapshot, book_snapshot=book_snapshot)
+# Kalshi's market poll is independent of the Coinbase fetches in load_state, so
+# it runs alongside them (it is cached for KALSHI_POLL_SECONDS, so usually free).
+auto_track = st.session_state.get("kalshi_auto_track", True)
+KALSHI_PAIR = "BTC-USD"   # KXBTC15M is a BTC/USD contract; see kalshi_pair_ok below
+kalshi_pair_ok = product_id == KALSHI_PAIR
+with ThreadPoolExecutor(max_workers=1) as _pool:
+    _kalshi_poll = (_pool.submit(kalshi_api.cached_btc15m_market, cfg.KALSHI_POLL_SECONDS)
+                    if auto_track and kalshi_pair_ok else None)
+    state = load_state(cfg, feed_snapshot=feed_snapshot, book_snapshot=book_snapshot)
 
 if state.error:
     st.error(f"Couldn't fetch live data: {state.error}")
@@ -293,16 +302,12 @@ if alert_fired:
 # session_state already holds the current values at the start of a rerun, so
 # there's no one-frame lag: editing a strike reruns the script, and this
 # reads the new value before the widget is drawn again.
-auto_track = st.session_state.get("kalshi_auto_track", True)
 # KXBTC15M is a BTC/USD contract. Auto-tracking it on any other pair would
 # price a ~$75k BTC strike against that pair's candles (ETH, SOL, or BTC in
 # EUR) and log the result under the BTC ticker, so it only runs on BTC-USD.
-KALSHI_PAIR = "BTC-USD"
-kalshi_pair_ok = product_id == KALSHI_PAIR
-
 kalshi_live = None
-if auto_track and kalshi_pair_ok:
-    kalshi_live = kalshi_api.cached_btc15m_market(cfg.KALSHI_POLL_SECONDS)
+if _kalshi_poll is not None:
+    kalshi_live = _kalshi_poll.result()
     if kalshi_live["available"]:
         # Strike only resets when the window itself actually changes -- so a
         # manual edit mid-window survives instead of being fought every
@@ -567,7 +572,12 @@ with tab_chart:
     # The one panel deliberately allowed to overflow the fold. Everything else
     # on the page is sized to fit a viewport; a price chart squeezed into
     # 330px would be useless, so this is the scroll the layout budgets for.
-    st.plotly_chart(build_figure(df, cfg), width="stretch")
+    # Rebuilt only when the data under it changes (a new candle or a moved last
+    # close), not on every refresh tick.
+    _chart_key = (product_id, len(df), str(df["time"].iloc[-1]), float(df["close"].iloc[-1]))
+    if st.session_state.get("_chart_key") != _chart_key:
+        st.session_state["_chart_fig"], st.session_state["_chart_key"] = build_figure(df, cfg), _chart_key
+    st.plotly_chart(st.session_state["_chart_fig"], width="stretch")
 
 with tab_book, st.container(height=TAB_BODY_HEIGHT, border=False):
     if not cfg.ENABLE_BOOK_FEEDS:

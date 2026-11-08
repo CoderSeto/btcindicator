@@ -3,6 +3,7 @@ Fetch + compute pipeline for the dashboard, factored out from main.py's
 polling loop so the Streamlit app can call it once per rerun and handle
 errors gracefully (rather than retrying forever in a while-loop).
 """
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -52,13 +53,21 @@ def load_state(cfg, feed_snapshot: Optional[dict] = None,
     order-book signal falls back to a single Coinbase REST snapshot.
     """
     have_book = bool(book_snapshot and book_snapshot.get("available"))
-    try:
-        raw = data_fetch.get_candles(cfg.PRODUCT_ID, cfg.GRANULARITY, cfg.CANDLE_HISTORY)
-        # Only needed for the fallback path -- the live depth feeds already
-        # carry a better read of the same thing, so skip the extra request.
-        rest_book = None if have_book else data_fetch.get_order_book(cfg.PRODUCT_ID, level=2)
-    except Exception as e:
-        return DashboardState(error=str(e))
+    # The candles, the ticker and (only without the depth feeds) the REST book
+    # are independent requests; run them together so a refresh costs the
+    # slowest one, not their sum. The ticker is asked for without the candles
+    # and falls back to them below, once they are in hand.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_raw = pool.submit(data_fetch.get_candles, cfg.PRODUCT_ID, cfg.GRANULARITY, cfg.CANDLE_HISTORY)
+        # The live depth feeds already carry a better read of the same thing as the REST book.
+        f_book = None if have_book else pool.submit(data_fetch.get_order_book, cfg.PRODUCT_ID, 2)
+        f_spot = pool.submit(data_fetch.latest_price, cfg.PRODUCT_ID, None)
+        try:
+            raw = f_raw.result()
+            rest_book = f_book.result() if f_book else None
+        except Exception as e:
+            return DashboardState(error=str(e))
+        spot = f_spot.result()
 
     df, _ = data_fetch.drop_forming_candle(raw, cfg.GRANULARITY)
     min_needed = max(cfg.SMA_SLOW, cfg.BOLLINGER_PERIOD, cfg.MACD_SLOW, cfg.RSI_PERIOD) + 2
@@ -85,7 +94,8 @@ def load_state(cfg, feed_snapshot: Optional[dict] = None,
     weighted = weighting.weighted_conviction(snap, weights)
     out = outlook_mod.build_outlook(snap, div, confidence, weighted)
 
-    spot = data_fetch.latest_price(cfg.PRODUCT_ID, raw)
+    if spot["price"] is None:
+        spot = data_fetch.price_from_candles(raw, spot["reason"])
     return DashboardState(
         df=df, live_price=spot["price"], live_price_source=spot["source"],
         live_price_note=spot["reason"], price_df=raw,

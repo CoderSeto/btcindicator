@@ -152,6 +152,11 @@ def latest_price(product_id: str, candles: pd.DataFrame = None) -> dict:
                 "time": pd.Timestamp(ts) if ts else None, "reason": None}
     except Exception as e:                       # network, HTTP, schema: all mean "no ticker"
         reason = f"ticker unavailable ({e})"
+    return price_from_candles(candles, reason)
+
+
+def price_from_candles(candles: pd.DataFrame, reason: str = None) -> dict:
+    """latest_price()'s fallback: the newest candle's close (may lag the ticker), flagged with `reason`."""
     if candles is None or candles.empty:
         return {"price": None, "source": None, "time": None, "reason": reason}
     return {"price": float(candles["close"].iloc[-1]), "source": "candles",
