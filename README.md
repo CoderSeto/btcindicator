@@ -140,6 +140,13 @@ Paper trading holds every position to settlement; there is no early exit yet.
 Before building one, `python review/kalshi_scalp_backtest.py` tests whether
 buying a side and selling it back 1-3 minutes later can beat the round trip's
 costs (the spread and Kalshi's fee, paid twice) on the historical contracts.
+
+The historical cache has no depth, trade-flow or liquidation data, so those can
+only be tested forward. `EDGE_HYPOTHESES.md` pre-registers five hold-to-settlement
+hypotheses; `python edge_recorder.py` collects the data (months: a 3 c edge needs
+about 3,300 trades, a 1 c edge is untestable), and
+`python review/kalshi_forward_edge.py` evaluates them once, under fixed stopping
+and futility rules. Nothing here has passed; nothing is wired into the live bot.
 Run `python review/kalshi_market_study.py fetch` first to download the data it
 reads. It prints the cost floor, the best case an all-knowing trader could make,
 and four simple entry rules held to the same selection standard as the edge
@@ -192,6 +199,8 @@ start a fresh account.
 | `kalshi_api.py` | Public (no-auth) client for Kalshi's own market data API -- auto-discovers the currently open KXBTC15M contract's strike, close time, and quoted price. Run standalone (`python kalshi_api.py`) to sanity-check connectivity. |
 | `kalshi_tracking.py` | Logs fair-value predictions and checks them against real settled outcomes, to measure calibration empirically. Run standalone (`python kalshi_tracking.py`) once you've accumulated some tracked predictions. |
 | `paper_trading.py` | Paper trading for KXBTC15M: simulated taker orders (at the ask, with Kalshi's fee), settled on the real result, kept in `paper_trades.csv`. Runs standalone (`python paper_trading.py`) for a terminal report. |
+| `edge_recorder.py` | Forward recorder for the KXBTC15M edge hunt (`EDGE_HYPOTHESES.md`): one row a second of the live Kalshi quote, spot, depth, flow and the model's inputs. Standalone (`python edge_recorder.py`); `--capture` saves Kalshi payloads as test fixtures. |
+| `kalshi_forward_study.py` | Evaluates the five pre-registered hypotheses on the recorded data (`python review/kalshi_forward_edge.py`). Interim until a hypothesis reaches its stopping rule. |
 | `app.py` | The Streamlit dashboard itself. |
 | `tests/` | Pytest suite covering the order-book math (cross-validated against brute-force references), every exchange payload parser (against the exchanges' own documented examples), the Binance sequence-gap handling, and the CSV log schema. Run with `pytest`. |
 

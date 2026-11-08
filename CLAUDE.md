@@ -185,6 +185,25 @@ such, not slipped in quietly.
   the break-even move and an ORACLE ceiling (look-ahead, an upper bound on any
   direction rule, not a strategy). `review/kalshi_scalp_backtest.py` runs it on
   the `study_data/` cache.
+- `edge_recorder.py` / `kalshi_forward_study.py` -- the forward edge hunt
+  (`EDGE_HYPOTHESES.md`, REVIEW_FINDINGS.md "Forward edge hunt"). The recorder
+  writes one fixed-schema row a second joining the live Kalshi YES top of book
+  (public orderbook endpoint; YES ask = 1 - best NO bid), `latest_price()`,
+  the depth and flow aggregators, liquidations, and `settlement_probability`
+  with its raw inputs and a model-version tag; blanks and an `*_up` flag per
+  source, a `gap` row when the loop stalls, Kalshi prints to a second log,
+  everything via `csv_utils.append_row`. Standalone, key-free, not wired into
+  the dashboard or alerts. The evaluator transcribes the pre-registered doc:
+  five hold-to-settlement hypotheses, one entry per market, taker fills,
+  per-order fee, day-block intervals, Bonferroni over 5, and refuses rows
+  stamped before the pre-registration. Changing a constant in either the doc
+  or the evaluator after data exists is a labelled amendment counted in the
+  family, never a quiet edit. `kalshi_api.parse_orderbook` / `parse_trades`
+  raise `KalshiSchemaError` on an unrecognised payload and are UNTRUSTED
+  until `python edge_recorder.py --capture` has saved real payloads to
+  `tests/fixtures/` (Kalshi was unreachable where they were written).
+  `review/kalshi_forward_edge.py` runs the evaluation; its report says
+  "INTERIM, NOT A VERDICT" until a hypothesis reaches its stopping rule.
 
 ## Design principles (the "why" behind non-obvious choices)
 
@@ -539,12 +558,16 @@ python analyze_correlation.py     # needs LOG_ALL_SIGNALS=True first
 python kalshi_tracking.py         # needs LOG_KALSHI_PREDICTIONS=True first
 python paper_trading.py          # settle due paper trades and print the account
 python review/kalshi_scalp_backtest.py   # scalping backtest on the cached study data (run kalshi_market_study.py fetch first)
+python edge_recorder.py --capture        # save verbatim Kalshi orderbook/trades payloads to tests/fixtures/ (do this first, then pytest)
+python edge_recorder.py                  # forward recorder for the edge hunt (EDGE_HYPOTHESES.md); runs for months
+python review/kalshi_forward_edge.py     # evaluate the pre-registered hypotheses on edge_record.csv
 ```
 
 ## Runtime-generated files (gitignored -- not source, don't hand-edit)
 
 `alerts_log.csv`, `signal_log.csv`, `backtest_results.json`,
-`kalshi_predictions.csv`, `kalshi_outcomes_cache.json`, `paper_trades.csv` -- all created
+`kalshi_predictions.csv`, `kalshi_outcomes_cache.json`, `paper_trades.csv`,
+`edge_record.csv`, `edge_trades.csv` -- all created
 automatically by the scripts above on first use. Plus
 `*.csv.<timestamp>.bak`, written when a log's column layout changes
 between releases (gotcha #1) -- old data, still readable, safe to delete

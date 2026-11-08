@@ -563,3 +563,74 @@ at entry 10, and 1.8-5.3% at entry 5 for 1-2 minute holds (14.0% at 3 minutes).
 ```bash
 python review/kalshi_scalp_backtest.py        # needs the study_data/ cache from kalshi_market_study.py fetch
 ```
+
+
+## Forward edge hunt (pre-registered 2026-11-08; no confirmatory data yet)
+
+**Question:** is there a tradeable edge in KXBTC15M from information the historical cache cannot hold:
+quote staleness at second resolution, the settlement-averaging gap in the last minutes, live depth,
+trade flow and liquidations? **Status: nothing has been tested. No edge found, because no
+confirmatory data exists yet.** The design is fixed in `EDGE_HYPOTHESES.md` (commit dcce8ff, before
+any forward row existed), the recorder and evaluator are built and tested, and the data has to be
+collected forward for months.
+
+Code: `edge_recorder.py` (recorder; `tests/test_edge_recorder.py`), `kalshi_forward_study.py`
+(evaluator; `tests/test_kalshi_forward_study.py`), `review/kalshi_forward_edge.py` (runs it).
+
+### What was decided before any data
+
+- **Five hypotheses, hold to settlement, 1 contract, taker fills, per-order fee**, all in the last
+  1-5 minutes: H1 stale quote after a >= 5 bp Coinbase move with the Kalshi quote unchanged 10 s (filled
+  on the NEXT tick, to charge the recorder's own latency); H2 the model vs the quote 60-180 s before
+  close, where `settlement_probability` is exact, with a 2 c margin; H3 depth imbalance >= 0.18 held
+  30 s; H4 `agg_delta` beyond +/-0.30; H5 >= $1M of one-sided liquidations in 30 s. H3-H5 only when the
+  Kalshi mid is in [0.40, 0.60], because the information has to beat the market, not 50%. Family of 5,
+  Bonferroni z = 2.576.
+- **Excluded, with reasons in the doc:** price-bucket bias (already tested on 30,688 markets with MDEs
+  no forward sample can match), scalping (round trip 4-5 c, already negative), maker quoting (no queue
+  data; any print-based fill model is an upper bound and is labelled exploratory). Time of day and vol
+  regime are stratifications, not hypotheses.
+- **Power.** Per-contract SD ~0.45, so 80% power at a true edge e needs n_eff = ((2.576 + 0.842) x 0.45 / e)^2:
+
+  | true net edge | n_eff | raw trades (n_eff = 0.8 n) | at ~24 trades/day |
+  |---|---|---|---|
+  | 1 c | 23,650 | 29,560 | ~41 months |
+  | 2 c | 5,910 | 7,390 | ~10 months |
+  | 3 c | 2,630 | 3,290 | ~4.6 months |
+
+  **A 1 c edge is untestable forward. The smallest confirmable edge is about 3 c a contract**, more
+  than the trade's whole cost.
+- **Stopping rule:** each hypothesis is evaluated once, at n_eff >= 2,630 or on 2027-05-08, whichever
+  comes first. Verdict order: inconclusive (half-width > 2 c), passes, rejected, not detected. A
+  survivor is paper-traded under its own `source` before any claim. Until the stop, the report prints
+  "INTERIM, NOT A VERDICT".
+- **Sanity checks, all mandatory:** side-flip permutation null (Amendment 1: the outcome-shuffle null
+  first written is degenerate for flat sizing), strata by day, 6-hour bin and vol tercile, +1 c worse
+  fills, top-5-market concentration, model-version drift, H3-H5 overlap.
+
+### What the recorder writes
+
+`edge_record.csv`, one row a second: Kalshi ticker, strike, close, seconds to close; YES bid/ask with
+size at the touch (YES ask = 1 - best NO bid, from the public orderbook endpoint), last trade, quote
+age and the poll's round trip; Coinbase spot from `latest_price()` with its source; aggregated depth
+imbalance, near imbalance, microprice, persistence, flow; trade-flow delta and notionals;
+liquidation notional by side over 30 s; `settlement_probability`, `crossing_probability`, and every
+raw input to them (spot, strike, seconds, annual vol, candles used, window end) with a model-version
+tag. An `*_up` flag per source, blank (never zero) for anything down, and an explicit `gap` row when
+the loop stalls. Kalshi prints go to `edge_trades.csv`. All writes through `csv_utils.append_row`.
+
+### Not verified here
+
+- **Kalshi's orderbook and trades schema.** Kalshi's API was unreachable from the environment this was
+  written in (proxy 403), so `kalshi_api.parse_orderbook` / `parse_trades` follow the documented field
+  names and raise `KalshiSchemaError` on anything else; the recorder stops rather than record
+  garbage. `python edge_recorder.py --capture` saves verbatim payloads to `tests/fixtures/`, and two
+  tests apply the parsers to them once present. Until then the parsers are untrusted.
+- **The exploratory pass on the cache** was not run: no `study_data/` here. At minute resolution the
+  cache can only speak to H1 (the scalp study's `btc_momentum`, negative) and H2 (Step 3, negative).
+
+```bash
+python edge_recorder.py --capture      # first: save real Kalshi payloads, then run pytest
+python edge_recorder.py                # then: record, for months
+python review/kalshi_forward_edge.py   # evaluate; interim until a hypothesis reaches its stop
+```
