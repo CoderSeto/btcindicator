@@ -19,6 +19,10 @@ Windows. Two portability bugs were fixed there: a test read `app.py` as cp1252, 
 caches `/candles` for ~5 minutes, so the header and Kalshi spot could be 5 minutes stale. Spot now comes
 from `/ticker`, and live candle requests send a time range so they skip that cache.
 
+**Edge study (2026-11-08):** is there a tradeable edge in Kalshi's KXBTC15M contracts? Step 2 says
+**not in the market's own prices**: 30,688 contracts, 120 pre-registered cells, none survives costs on
+the training data. Details in the section "Is there an edge?" at the end.
+
 **Second follow-up:** five more items are done: T1 (feed-parser tests), known item 2
 (configured column names), D5 (forming candle), D10 (Kalshi poll) and D16 (deprecated API).
 Testing the parsers turned up **B17**, a real bug: Coinbase trades were counted backwards in the
@@ -163,10 +167,151 @@ commit was checked in a clean worktree with the full suite.
 ## Re-running the evidence
 
 ```bash
-python -m pytest -q                                              # 508 passed
+python -m pytest -q                                              # 616 passed, 2 skipped
 python review/settlement_averaging.py                            # B3 / D4: point vs averaged vs Monte Carlo
 python review/backtest_overlap.py 80                             # D2 / D3: n_eff and noise gate (~4 min)
 python review/csv_writer_race.py                                 # D7: unlocked vs append_row, 8 writers
 ```
 
 D1 and D6 are now ordinary tests in `tests/test_app.py` and `tests/test_log_schema.py`.
+
+## Is there an edge? The KXBTC15M study (2026-11-08)
+
+**Question:** is there a tradeable edge in Kalshi's 15-minute BTC contracts, after real costs?
+**Step 2 answer: not in the market's own prices.** Buying YES at the ask or NO at 1 − bid, in any
+price bucket, at 10, 5 or 2 minutes before close, loses money or breaks even on the training data.
+Not one of the 120 cells passes the selection rule, so nothing goes to the held-out set as a
+claim. Step 3 (does `kalshi.settlement_probability` beat the market?) follows below.
+
+Code: `kalshi_study.py` (tested: `tests/test_kalshi_study.py`, `tests/test_kalshi_study_model.py`).
+Analysis: `python review/kalshi_market_study.py fetch|step2|step3`. Raw data is cached in
+`study_data/` (gitignored).
+
+### Design, fixed before any outcome was seen
+
+The design is pinned in `kalshi_study.py`'s docstring. It was committed in `f8a4da5` before any data
+had been fetched, and amended twice before any outcome had been looked at (only raw quotes had been
+seen, enough to notice that December 2025 books were thin). The amendments are labelled in the
+docstring.
+
+- **Data.** Every settled KXBTC15M market Kalshi lists: 31,046 markets, of which 30,688 settled yes
+  or no, closing 2025-12-15 → 2026-11-08 UTC. Markets settled before `/historical/cutoff` come from
+  `/historical/`. 84 contracts have no candles at any endpoint.
+- **Split.** Chronological. Contracts closing from 2026-08-02 21:00 UTC (the last 30%, 9,207
+  contracts, 99 days) are held out. Training is the first 21,481 contracts over 231 days.
+- **One observation per contract per horizon** (10, 5 and 2 minutes before close). Each is the quote
+  standing at that minute: the closing bid/ask of the 1-minute candle whose period *ends* then.
+  Tests pin that it is never the next candle.
+- **Real book:** `0 < bid < ask < 1` and `ask − bid ≤ 20¢`. The spread cap was the second amendment.
+  Without it, a placeholder such as bid 0.001 / ask 0.55 counted as a book with a "mid" of 0.28.
+- **Costs.** YES is bought at the ask, NO at 1 − bid, plus Kalshi's taker fee
+  `round up(0.07 × C × P × (1−P))`. That is the formula in Kalshi's own schedule
+  (kalshi.com/docs/kalshi-fee-schedule.pdf, "Last updated and effective: July 7, 2026"); there is no
+  settlement fee. KXBTC15M isn't on the non-standard list, and `GET /series/KXBTC15M` reports
+  `fee_type: quadratic, fee_multiplier: 1`. The schedule's text says the round-up is "to a
+  centicent", but its printed table rounds each order to the cent ($0.02 for one contract at 50¢).
+  This study uses the cent, the costlier reading, **per order**. Orders of **1 contract** (2¢ at
+  50¢) and **100 contracts** (1.75¢ each) are both reported in full; neither size was chosen by its
+  results. A test reproduces every row of Kalshi's printed table.
+- **Fills** are assumed at the quoted top of book. Candlesticks carry no depth, so the size really
+  available there may be small, especially for 100 contracts. That makes every EV here an upper
+  bound on what a real order would get.
+- **Statistics.** Intervals are a block bootstrap by UTC day (2,000 resamples), shown as
+  mean ± z·SE. **z = 3.62 is one Bonferroni correction over every test in Steps 2 and 3 together:
+  168.** That is 120 Step 2 cells (3 horizons × 10 buckets × 2 sides × 2 order sizes), 36 Step 3
+  trading variants and 12 Step 3 scoring comparisons. Each bucket also shows its **minimum detectable
+  edge (MDE = z × SE)**, the smallest edge per contract it could have detected. `n_eff` is the
+  sample size adjusted for same-day correlation.
+- **Buckets** are fixed 10¢ bands of the mid, constants rather than quantiles of any data, so train
+  and test are bucketed identically.
+- **Selection rule.** A cell counts only if its train interval lies entirely above zero. Only such
+  cells are then scored on the held-out set. The test tables print for all 120 cells, but they are
+  descriptive, and nothing below is claimed from them.
+
+### Step 2 result: no cell selected
+
+**Selected on train: none of 120.** Every train cell's family interval includes or lies below zero.
+These are the train cells with the highest point estimates; none clears its interval:
+
+| Train, 100-contract orders | n | EV per contract | Family interval | MDE |
+|---|---|---|---|---|
+| 10 min, mid 0.9–1.0, buy YES | 834 | +0.4¢ | [−2.2, +3.1]¢ | 2.7¢ |
+| 10 min, mid 0.0–0.1, buy NO | 780 | +0.3¢ | [−2.6, +3.1]¢ | 2.9¢ |
+| 5 min, mid 0.9–1.0, buy YES | 4,599 | +0.3¢ | [−0.6, +1.1]¢ | 0.8¢ |
+| 5 min, mid 0.0–0.1, buy NO | 4,484 | +0.2¢ | [−0.8, +1.2]¢ | 1.0¢ |
+| 2 min, mid 0.2–0.3, buy NO | 624 | +1.3¢ | [−4.3, +6.8]¢ | 5.6¢ |
+| 2 min, mid 0.0–0.1, buy NO | 5,914 | +0.1¢ | [−0.5, +0.7]¢ | 0.6¢ |
+
+With 1-contract orders every one of these is lower, by 0.25–0.7¢ per contract: on a single
+contract the fee rounds up to a whole cent. Most cells lose 2–5¢ per contract, which is roughly the spread plus the fee.
+
+**What the null rules out.** Net of costs, at 100-contract orders, on training data:
+
+- **Extreme buckets (mid below 0.1 or above 0.9) at 5 and 2 minutes:** an edge of more than about
+  **1¢ per contract** in either direction (MDE 0.6–1.0¢).
+- **Middle buckets at 10 minutes:** an edge of more than about **3¢** (MDE 2.5–3.4¢).
+- **Middle buckets at 2 minutes:** only edges above **3.5–8.4¢**. Few contracts are still near 50%
+  that late, so these cells are thin.
+
+A positive edge smaller than the MDE is not ruled out. It would also have to survive real fill
+sizes, which this data can't see.
+
+**Favorite-longshot bias: it shows on train but does not hold on held-out.** The logistic
+calibration slope of outcome on logit(mid) is 1 for a calibrated price and above 1 when favorites
+are underpriced:
+
+| | 10 min | 5 min | 2 min |
+|---|---|---|---|
+| Train slope ± SE | 1.058 ± 0.014 (z +4.1) | 1.065 ± 0.013 (z +5.0) | 1.073 ± 0.019 (z +3.8) |
+| Test slope ± SE | 1.071 ± 0.029 (z +2.5) | 1.010 ± 0.018 (z +0.6) | 0.921 ± 0.016 (z **−4.9**) |
+
+These six fits are outside the 168 counted tests. Counting them makes 174, and z barely moves
+(3.63). On train, all three horizons show a mild favorite-longshot bias. On the held-out months it
+is not significant at 10 or 5 minutes, and at 2 minutes it has reversed: prices are too extreme. A
+pattern that flips sign out of sample is not an edge. Either way it is worth at most a few cents on
+the extreme buckets, which is about what the spread and fee take.
+
+### Exclusions and whether they depend on the outcome
+
+Rows are dropped for three reasons: no candle at that exact minute (`no_quote`), a missing side
+(`one_sided`), or a spread over 20¢ (`wide_spread`). Per month, from `step2`:
+
+- **December 2025** is the worst month. At 10 minutes, 136 of 1,304 rows are dropped (28 no quote,
+  26 one-sided, 82 wide spread). The median spread at 5 minutes was 4¢, and only 26% of books were
+  2¢ or tighter.
+- **January and February 2026** have 1–2% dropped at 10 minutes. From March on, almost nothing is
+  dropped at 10 minutes. At 5 minutes, 3–5% are one-sided through March and almost none from April.
+  The held-out months drop nothing at all at 10 or 5 minutes. Median spreads tighten to 1¢ by
+  February.
+- **The spread cap** removed 91, 85 and 89 rows at the three horizons. 86% of them (82, 68 and 77)
+  are from December 2025, and it removed none after May.
+- **At 2 minutes, 15% of rows are dropped**, almost all one-sided: by then many contracts are
+  decided and one side of the book is gone. The 0.0–0.1 and 0.9–1.0 buckets at 2 minutes therefore
+  describe contracts that still had both sides quoted, not the most decided ones.
+
+**Missingness does not depend on the outcome.** These are YES-settled minus NO-settled exclusion
+rates, with z against the family threshold of 3.62:
+
+| | 10 min | 5 min | 2 min |
+|---|---|---|---|
+| All rows | +0.14 pt (z 1.5) | +0.22 pt (z 1.2) | +0.86 pt (z 2.2) |
+| Spread cap alone | +0.09 pt (z 1.4) | 0.00 pt (z −0.1) | −0.06 pt (z −1.2) |
+
+No gap is significant, and none is large enough to move a bucket's YES rate by more than a fraction
+of its interval.
+
+### Limits
+
+- **Fill size is unknown.** Every EV assumes the full order fills at the top-of-book price.
+- **The market changes.** Fees, tick sizes and market makers can change; held-out spreads are
+  already tighter than train's (1¢ vs 1.7–2¢ median).
+- **Order type.** Only taker orders were tested. Resting maker orders (no fee on this series, and
+  they earn the spread) are a different strategy, needing queue and fill data this study doesn't
+  have.
+- **Data window.** Eleven months. The series' listing may go back further than the historical
+  listing returned.
+
+```bash
+python review/kalshi_market_study.py fetch    # resumable; hours the first time (the /historical/ endpoint is rate-limited)
+python review/kalshi_market_study.py step2
+```
