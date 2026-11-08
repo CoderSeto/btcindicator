@@ -505,6 +505,23 @@ def test_threaded_fetch_writes_every_market_exactly_once(tmp_path, no_sleep):
     assert 1 <= len(sessions) <= 4
 
 
+def test_quote_differences_compare_two_sources_minute_by_minute():
+    # The same verbatim market from both endpoints agrees; a perturbed copy and a missing minute do not.
+    e = HIST_CANDLES["markets"][0]
+    m = ks.parse_settled_market(HIST_PAGE["markets"][0])
+    same = ks.quote_differences([m], {m["ticker"]: e["candlesticks"]}, {m["ticker"]: e["candlesticks"]}, (10, 5, 2))
+    assert same["same"].all()
+    changed = json.loads(json.dumps(e["candlesticks"]))
+    t5 = m["close_ts"] - 300
+    for c in changed:
+        if c["end_period_ts"] == t5:
+            c["yes_ask"]["close_dollars"] = "0.7800"
+    changed = [c for c in changed if c["end_period_ts"] != m["close_ts"] - 120]
+    d = ks.quote_differences([m], {m["ticker"]: e["candlesticks"]}, {m["ticker"]: changed}, (10, 5, 2))
+    assert d.set_index("horizon")["same"].to_dict() == {10: True, 5: False, 2: False}
+    assert d.set_index("horizon").loc[5, "ask_b"] == 0.78
+
+
 def test_historical_cutoff_reads_market_settled_ts(no_sleep):
     s = FakeSession(lambda u, p: FakeResponse(200, {"market_settled_ts": "2026-09-08T00:00:00Z",
                                                     "trades_created_ts": "2026-09-08T00:00:00Z"}))

@@ -582,6 +582,27 @@ def historical_cutoff(session):
     return _ts(ts) if ts else None
 
 
+def quote_differences(markets: list, candles_a: dict, candles_b: dict, horizons=HORIZONS_MIN) -> pd.DataFrame:
+    """
+    For each market and horizon, the (bid, ask) two candle sources give at
+    that minute, and whether they agree. Used to check that the /historical/
+    per-market endpoint (all of train) and the batch endpoint (most of the
+    held-out set) report the same quotes for markets both serve.
+    """
+    rows = []
+    for m in markets:
+        a = parse_candles(candles_a.get(m["ticker"], []))
+        b = parse_candles(candles_b.get(m["ticker"], []))
+        for h in horizons:
+            t = m["close_ts"] - 60 * h
+            qa, qb = quote_at(a, t), quote_at(b, t)
+            rows.append({"ticker": m["ticker"], "horizon": h,
+                         "bid_a": qa[0] if qa else None, "ask_a": qa[1] if qa else None,
+                         "bid_b": qb[0] if qb else None, "ask_b": qb[1] if qb else None,
+                         "same": qa is not None and qb is not None and qa[:2] == qb[:2]})
+    return pd.DataFrame(rows)
+
+
 def fetch_market_candles(session, m: dict) -> list:
     """
     One market's 1-minute candlesticks from the per-market endpoints: the

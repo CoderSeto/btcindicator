@@ -35,7 +35,7 @@ def load_markets(session=None, refresh=False):
 def cmd_fetch(refresh=False):
     s = _session()
     raw, markets = load_markets(s, refresh)
-    print(f"{len(raw)} settled markets listed, {len(markets)} settled yes/no; "
+    print(f"{len(raw)} settled markets listed, {len(markets)} with a strike (the rest have no floor_strike); "
           f"{pd.to_datetime(markets[0]['close_ts'], unit='s')} .. {pd.to_datetime(markets[-1]['close_ts'], unit='s')} UTC")
 
     def progress(i, n):
@@ -284,6 +284,52 @@ def cmd_step3():
             s = results[("test",) + v]
             print(f"  TEST {v}: n={s['n']} mean {_pct(s['mean'])} "
                   f"[{_pct(s['mean'] - z_t * s['se'])}, {_pct(s['mean'] + z_t * s['se'])}] (z={z_t:.2f})")
+
+
+def cmd_sources():
+    """
+    Descriptive check, not a counted test: train comes entirely from the per-market
+    /historical/ endpoint, most of the held-out set from the batch endpoint. For 50
+    markets both serve (closing in the week before /historical/cutoff), fetch both and
+    compare the quotes at each horizon. Then the held-out 2-minute calibration slope,
+    split by which endpoint supplied the contract.
+    """
+    s = _session()
+    _, markets = load_markets(s)
+    cutoff = ks.historical_cutoff(s)
+    near = [m for m in markets if cutoff - 7 * 86400 <= m["close_ts"] < cutoff]
+    pick = [near[int(i)] for i in np.linspace(0, len(near) - 1, 50)]
+    print(f"/historical/cutoff = {pd.to_datetime(cutoff, unit='s')} UTC; comparing {len(pick)} markets closing "
+          f"{pd.to_datetime(pick[0]['close_ts'], unit='s')} .. {pd.to_datetime(pick[-1]['close_ts'], unit='s')}")
+    hist, batch = {}, {}
+    for m in pick:
+        page = ks._get(s, f"/historical/markets/{m['ticker']}/candlesticks",
+                       {"start_ts": m["open_ts"], "end_ts": m["close_ts"], "period_interval": 1})
+        hist[m["ticker"]] = (page or {}).get("candlesticks", [])
+    for tickers, lo, hi in ks.candle_batches(pick, cap=1000):     # non-adjacent markets: keep ranges short
+        page = ks._get(s, "/markets/candlesticks", {"market_tickers": ",".join(tickers), "start_ts": lo,
+                                                    "end_ts": hi, "period_interval": 1})
+        for e in (page or {}).get("markets", []):
+            batch[e["market_ticker"]] = e.get("candlesticks", [])
+    print(f"served: /historical/ {sum(bool(v) for v in hist.values())}, batch {sum(bool(v) for v in batch.values())} of {len(pick)}")
+    d = ks.quote_differences(pick, hist, batch)
+    for h in ks.HORIZONS_MIN:
+        x = d[d.horizon == h]
+        print(f"  h={h:2d}: {int((~x.same).sum())} of {len(x)} differ")
+    diff = d[~d.same]
+    if len(diff):
+        print(diff.to_string(index=False))
+
+    _, obs, split_cut = build_observations()
+    t2 = obs[(obs.split == "test") & (obs.horizon == 2) & obs.valid]
+    print()
+    print("Held-out 2-minute calibration slope by source (descriptive):")
+    for label, part in (("before cutoff (/historical/)", t2[t2.close_ts < cutoff]),
+                        ("from cutoff (batch)", t2[t2.close_ts >= cutoff]),
+                        ("August 2026", t2[t2.day.str[:7] == "2026-08"]),
+                        ("Sep-Nov 2026", t2[t2.day.str[:7] >= "2026-09"])):
+        c = ks.calibration_bootstrap(part["mid"], part["outcome"], part["day"])
+        print(f"  {label:30} n={len(part):5d}  b = {c['b']:.3f} +/- {c['b_se']:.3f}")
 
 
 if __name__ == "__main__":
