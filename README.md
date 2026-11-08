@@ -145,6 +145,11 @@ reads. It prints the cost floor, the best case an all-knowing trader could make,
 and four simple entry rules held to the same selection standard as the edge
 study.
 
+**Result (30,688 contracts):** none of the four rules beat costs, in the older or the
+held-out data; see `REVIEW_FINDINGS.md`, "Scalping backtest". The round trip costs 4-5 cents
+and the four rules carried about a cent or less of directional signal, so the paper-trading
+tab still only holds to settlement.
+
 Fills are deliberately unflattering: YES is bought at the **ask**, NO at
 **1 - the bid**, and Kalshi's taker fee is charged (rounded up to the cent per
 order). Settlement uses Kalshi's own recorded result, so basis risk against
