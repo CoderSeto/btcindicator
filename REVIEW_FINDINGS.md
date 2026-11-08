@@ -28,6 +28,13 @@ triggered. Step 3 also found that Kalshi's own records hold two strikes scaled b
 live dashboard would price as P(YES) = 100%. The dashboard now refuses such a strike and says why. Details in the
 section "Is there an edge?" at the end.
 
+**Scalping backtest (2026-11-08):** can a position be bought and sold back 1-3 minutes later for a
+profit? **Not with the four entry rules tested.** All 96 train and held-out cells lose money, with
+intervals entirely below zero, and none of the 48 pre-registered cells is selected. A trader who
+knew each direction in advance would profit (+5 to +14¢ a contract), so the contract moves enough;
+simple momentum and reversion rules just don't predict which way. Details in the section "Scalping
+backtest" at the end.
+
 **Second follow-up:** five more items are done: T1 (feed-parser tests), known item 2
 (configured column names), D5 (forming candle), D10 (Kalshi poll) and D16 (deprecated API).
 Testing the parsers turned up **B17**, a real bug: Coinbase trades were counted backwards in the
@@ -464,4 +471,95 @@ python review/kalshi_market_study.py step3    # needs the fetch; first run build
 python review/kalshi_market_study.py fetch    # resumable; hours the first time (the /historical/ endpoint is rate-limited)
 python review/kalshi_market_study.py step2
 python review/kalshi_market_study.py sources  # /historical/ vs batch quotes; held-out 2-min slope by source
+```
+
+
+## Scalping backtest (2026-11-08)
+
+**Question:** does buying a side of a KXBTC15M contract and selling it back 1, 2 or 3 minutes later
+earn more than the round trip costs? **Answer: not on any of the four entry rules tested.**
+
+Code: `kalshi_scalp_study.py` (tested: `tests/test_kalshi_scalp_study.py`,
+`tests/test_kalshi_scalp_backtest.py`). Run: `python review/kalshi_scalp_backtest.py`, on the
+`study_data/` cache. The design is pinned in `kalshi_scalp_study.py`'s docstring and was committed
+(ce5ddcf) before any scalp result had been computed.
+
+### Design, fixed before any result was seen
+
+- **Data, split, costs, intervals:** the edge study's. 30,688 contracts closing 2025-12-15 to
+  2026-11-08; the last 30% (9,207, closing from 2026-08-02) held out; YES bought at the ask and
+  sold at the bid, NO bought at 1 - bid and sold at 1 - ask; Kalshi's taker fee on both legs, rounded
+  up to the cent per order; fills at the quoted top of book with zero latency; day-block bootstrap.
+- **Trades:** one per contract per cell, entered 10 or 5 minutes before close and sold 1, 2 or 3
+  minutes later. If the exit quote is not a real book the position is held to settlement instead and
+  counted (`forced`), never dropped.
+- **Entry rules** (information at entry only): `contract_momentum` / `contract_reversion` (the
+  contract's mid moved at least 2¢ over the last 2 minutes; buy with or against it) and
+  `btc_momentum` / `btc_reversion` (Coinbase moved at least 2 bp over the last 2 minutes).
+- **Family:** 4 rules x 2 entry times x 3 holds x 2 order sizes (1 and 100) = **48 tests**, Bonferroni
+  z = 3.28. Selected on train only if the interval lies entirely above zero; only selected cells are
+  then scored on the held-out set.
+
+### Result 1: the round trip costs 4-5¢, and the contract moves far more than that
+
+Over every contract with a real book at both ends (no rule, descriptive):
+
+| entry / hold | n | round-trip cost (1-lot) | mean abs move of the mid | moves further than cost | ORACLE ceiling (1-lot) |
+|---|---|---|---|---|---|
+| 10 / 1 min | 30,396 | 5.0¢ | 8.5¢ | 61.5% | +4.6¢ |
+| 10 / 2 min | 30,370 | 4.8¢ | 12.2¢ | 73.4% | +8.1¢ |
+| 10 / 3 min | 30,326 | 4.8¢ | 15.3¢ | 80.3% | +11.1¢ |
+| 5 / 1 min | 29,509 | 3.9¢ | 8.4¢ | 58.3% | +5.3¢ |
+| 5 / 2 min | 28,459 | 3.8¢ | 12.7¢ | 71.7% | +9.5¢ |
+| 5 / 3 min | 25,859 | 3.7¢ | 17.4¢ | 81.2% | +14.0¢ |
+
+Cost is (spread in + spread out) / 2 plus both fees at the mids: how far the mid must move in your
+favour just to break even. The 100-lot cost is lower (2.5-4.0¢, since the per-order fee rounds up
+less per contract). The ORACLE is look-ahead profit per contract if the winning side were known in
+advance and the trade skipped when both lose: a ceiling on any direction rule, not a strategy. It is
+large, so **the opportunity exists in hindsight; the question is only whether direction is
+predictable.** As a rough back-of-envelope, if every move were the mean size, a trader would need to
+call the direction right about four times in five at a 1-minute hold, and about two in three at a
+3-minute hold, just to break even.
+
+### Result 2: no rule beats the cost, in train or held out
+
+- **Selected on train: none of 48.** Every train cell's interval lies below zero (best: contract
+  momentum, entry 5, hold 3, 100-lot, -2.1¢ [-2.8, -1.4]).
+- **Held out, descriptive:** all 48 cells are also negative with intervals below zero (best:
+  contract momentum, entry 5, hold 3, 100-lot, -1.0¢ [-1.8, -0.1]; most cells -2 to -5¢).
+- **The null is tight.** Each cell's minimum detectable edge is 0.4-0.9¢ a contract, so an edge of a
+  cent or more in these cells would have shown.
+- **The rules carry almost no direction.** About half of each rule's trades are YES. A rule and its
+  mirror trade the same contracts on opposite sides, so half the difference between their mean
+  profits (1-lot) estimates the directional information per trade: between **-1.0¢ and +0.55¢**
+  across all 24 train and held-out comparisons (e.g. 10 / 1: reversion beats momentum by ~0.5¢ on
+  train, 0.3¢ held out; late entries lean the other way, contract momentum beating reversion by
+  ~1.0¢ at 5 / 3 held out). That is the whole signal, against a 4-5¢ round trip. Not a counted
+  finding (the cells were not selected), but it is the right size to explain the null.
+
+### Reading the best-looking cells
+
+The least-bad cells are late entries with long holds (5 / 3). They are also the cells with the most
+**forced holds**: 15.8% of train entries and 4.4% of held-out ones had no sellable book at the exit
+(2 minutes before close) and were held to settlement, paying one fee and no exit spread. So part of
+their relative improvement is escaping the second leg of the cost, not skill, and the edge study
+already found holding to settlement loses too. Across all contracts, forced holds are 0.2-0.4%
+at entry 10, and 1.8-5.3% at entry 5 for 1-2 minute holds (14.0% at 3 minutes).
+
+### What this does and does not rule out
+
+- **Rules out:** these four entry rules at these times and holds, for taker scalps at the quoted top
+  of book. Every simplification (zero latency, full fill at the touch, one-minute decisions) flatters
+  a scalp, so real results would be worse, not better.
+- **Does not rule out:** exits that react inside a minute, take-profit and stop-loss exits, other
+  entry times, entry signals richer than a 2-minute momentum (for example the order-book signals,
+  which have no historical data), or resting maker orders (no fee on this series; needs queue and
+  fill data this study doesn't have). Each would be a counted amendment, not a change to this
+  design after the fact.
+- **Consequence for the bot:** the paper-trading tab stays hold-to-settlement. A Close button would
+  let someone try scalping by hand, but this backtest gives no reason to expect it to pay.
+
+```bash
+python review/kalshi_scalp_backtest.py        # needs the study_data/ cache from kalshi_market_study.py fetch
 ```

@@ -173,6 +173,18 @@ such, not slipped in quietly.
   the END of its minute. Some market records have no `floor_strike`, and
   two have one scaled by 10^-4.
   `review/kalshi_market_study.py` runs it.
+- `kalshi_scalp_study.py` -- the scalping backtest: buy a side, sell it back
+  1-3 minutes later at the then-standing bid, on one of four fixed entry rules
+  (contract momentum/reversion, BTC momentum/reversion). Same machinery and
+  discipline as `kalshi_study.py` (reuses its fee, `valid_book`, split,
+  day-block bootstrap and Bonferroni; fixed design in the docstring, changed
+  only by a labelled amendment that is counted in the family, never after
+  looking at outcomes). A scalp pays the spread and the taker fee twice, which
+  is the whole reason to test before building; an exit with no sellable book is
+  held to settlement and counted (`forced`), never dropped. `cost_floor()` gives
+  the break-even move and an ORACLE ceiling (look-ahead, an upper bound on any
+  direction rule, not a strategy). `review/kalshi_scalp_backtest.py` runs it on
+  the `study_data/` cache.
 
 ## Design principles (the "why" behind non-obvious choices)
 
@@ -459,7 +471,7 @@ and is what any new tests should match:
   wall large enough to hide itself under a mean.
 
 Also covered now: `kalshi.py`, `weighting.py`, `backtest.py`, `backtest_agg_delta.py`,
-`kalshi_tracking.py`, `paper_trading.py`, `kalshi_api.py`, `indicators.py`, `divergence.py`,
+`kalshi_tracking.py`, `paper_trading.py`, `kalshi_scalp_study.py`, `kalshi_api.py`, `indicators.py`, `divergence.py`,
 `outlook.py`, `dashboard_data.py`, `charts.py` and `app.py`. Writing them turned up three real bugs, all fixed:
 `compute_calibration` borrowed an older row's Kalshi quote (`groupby().first()`
 is per-column) and crashed when only some contracts had quotes, and
@@ -526,6 +538,7 @@ python kalshi.py --strike X --minutes Y   # one-off Kalshi fair-value check
 python analyze_correlation.py     # needs LOG_ALL_SIGNALS=True first
 python kalshi_tracking.py         # needs LOG_KALSHI_PREDICTIONS=True first
 python paper_trading.py          # settle due paper trades and print the account
+python review/kalshi_scalp_backtest.py   # scalping backtest on the cached study data (run kalshi_market_study.py fetch first)
 ```
 
 ## Runtime-generated files (gitignored -- not source, don't hand-edit)
