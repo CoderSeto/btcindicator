@@ -79,6 +79,11 @@ def print_bucket_table(t):
               f"{_pct(r.ev_no):>7} [{_pct(r.ev_no_lo):>7},{_pct(r.ev_no_hi):>7}] {100 * r.ev_no_mde:5.1f}c")
 
 
+def _z(g):
+    """gap / SE, or n/a when nothing was excluded on either side (SE 0)."""
+    return f"{g['gap'] / g['se']:+.2f}" if g["se"] > 0 else "n/a"
+
+
 def print_exclusions(obs):
     print("Excluded contract-rows by month (no candle at that exact minute, or not a two-sided book), "
           "and the exclusion rate among YES- vs NO-settled contracts:")
@@ -101,8 +106,8 @@ def print_exclusions(obs):
             both = d[ks.two_sided(d["bid"].to_numpy(), d["ask"].to_numpy())]
             w = ks.exclusion_outcome_gap(both)                 # the spread cap alone, among two-sided rows
             print(f"  {split:5} h={h:2d}: excluded {g['rate_yes']:.4f} of YES, {g['rate_no']:.4f} of NO, "
-                  f"gap {g['gap']:+.4f} +/- {g['se']:.4f} (z {g['gap'] / g['se']:+.2f});  "
-                  f"spread cap alone: {w['rate_yes']:.4f} vs {w['rate_no']:.4f} (z {w['gap'] / w['se']:+.2f})")
+                  f"gap {g['gap']:+.4f} +/- {g['se']:.4f} (z {_z(g)});  "
+                  f"spread cap alone: {w['rate_yes']:.4f} vs {w['rate_no']:.4f} (z {_z(w)})")
     print()
 
 
@@ -210,7 +215,7 @@ def cmd_step3():
         d["valid"] = d["p_model_adj"].notna()           # "excluded" = model could not price it
         g = ks.exclusion_outcome_gap(d)
         print(f"h={h:2d}: {len(d)} valid quotes, model unpriced {(~d.valid).sum()} "
-              f"(YES {g['rate_yes']:.4f}, NO {g['rate_no']:.4f}, gap z {g['gap'] / g['se']:+.2f})")
+              f"(YES {g['rate_yes']:.4f}, NO {g['rate_no']:.4f}, gap z {_z(g)})")
     print()
 
     # --- basis: Coinbase vs the settlement index ---
