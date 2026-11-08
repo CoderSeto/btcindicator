@@ -6,7 +6,8 @@ signal pipeline used by main.py (the console version). Run with:
 
     streamlit run app.py
 
-This is a monitoring/alerting tool -- it does NOT place any trades.
+This is a monitoring/alerting tool -- it does NOT place any real trades. The
+Paper trading tab simulates Kalshi orders only (see paper_trading.py).
 """
 import os
 from datetime import datetime
@@ -25,6 +26,7 @@ import kalshi_api
 import kalshi_tracking
 import orderbook
 import orderbook_feeds
+import paper_trading
 import weighting
 from charts import build_figure
 from dashboard_data import load_state
@@ -556,9 +558,9 @@ with right:
 # only cost is scrolling the page.
 TAB_BODY_HEIGHT = 300
 
-tab_book, tab_feeds, tab_chart, tab_alerts, tab_notes = st.tabs(
+tab_book, tab_feeds, tab_chart, tab_alerts, tab_paper, tab_notes = st.tabs(
     ["\U0001F4D2 Order Book", "\U0001F4E1 Feeds", "\U0001F4C8 Chart",
-     "\U0001F514 Alerts", "\u2139\uFE0F Notes & limits"]
+     "\U0001F514 Alerts", "\U0001F9EA Paper trading", "\u2139\uFE0F Notes & limits"]
 )
 
 with tab_chart:
@@ -712,6 +714,140 @@ with tab_alerts, st.container(height=TAB_BODY_HEIGHT, border=False):
             st.dataframe(log_df.tail(25).iloc[::-1], width="stretch", hide_index=True)
     else:
         st.caption("No alerts logged yet -- they'll show up here once enough indicators align.")
+
+with tab_paper, st.container(height=TAB_BODY_HEIGHT, border=False):
+    # Settle first, so a contract that resolved since the last refresh is already
+    # in the numbers below. Throttled and never raises (paper_trading.settle_due).
+    paper_trading.settle_due(cfg)
+
+    quote_ok = bool(kalshi_live and kalshi_live["available"])
+    yes_price = paper_trading.fill_price("yes", kalshi_live["yes_bid"], kalshi_live["yes_ask"]) if quote_ok else None
+    no_price = paper_trading.fill_price("no", kalshi_live["yes_bid"], kalshi_live["yes_ask"]) if quote_ok else None
+
+    oc1, oc2, oc3 = st.columns([1, 1, 1])
+    with oc1:
+        paper_contracts = st.number_input("Contracts", min_value=1, step=1, value=1, key="paper_contracts")
+    with oc2:
+        buy_yes = st.button(
+            f"Buy YES @ {yes_price * 100:.1f}\u00a2" if yes_price else "Buy YES (no quote)",
+            key="paper_buy_yes", disabled=yes_price is None, width="stretch")
+    with oc3:
+        buy_no = st.button(
+            f"Buy NO @ {no_price * 100:.1f}\u00a2" if no_price else "Buy NO (no quote)",
+            key="paper_buy_no", disabled=no_price is None, width="stretch")
+
+    if not quote_ok:
+        st.caption("Paper trading needs the live KXBTC15M quote: turn on Auto-track, on BTC-USD, "
+                   "with Kalshi reachable.")
+    elif buy_yes or buy_no:
+        # The poll cache can be ~KALSHI_POLL_SECONDS old; an order is priced on a fresh quote.
+        fresh = kalshi_api.current_btc15m_market()
+        model_p = None
+        if kalshi_result["available"] and fresh.get("available") and kalshi_result["strike"] == fresh["strike"]:
+            model_p = kalshi_result["p_yes"]
+        placed = paper_trading.place_order(
+            cfg, fresh, "yes" if buy_yes else "no", int(paper_contracts), spot=live_price,
+            model_p_yes=model_p, composite=snapshot.composite)
+        if placed["ok"]:
+            t = placed["trade"]
+            st.success(_esc(
+                f"Bought {t['contracts']} {t['side'].upper()} on `{t['ticker']}` at "
+                f"{t['price'] * 100:.1f}\u00a2 + ${t['fee']:.2f} fee = ${t['cost']:.2f}. "
+                f"Pays ${t['contracts']:.2f} if {t['side'].upper()} wins."))
+        else:
+            st.error(_esc(placed["reason"]))
+
+    ac1, ac2, ac3 = st.columns([1, 1, 1])
+    with ac1:
+        auto_on = st.checkbox(
+            "Auto-trade", value=cfg.PAPER_AUTO_ENABLED, key="paper_auto",
+            help=f"Enters one position per market, from {cfg.PAPER_AUTO_ENTRY_MINUTES:g} down to "
+                 f"{cfg.PAPER_AUTO_LAST_MINUTES:g} minutes before close, on the first refresh where the "
+                 "rule fires. Only trades while this page is open and refreshing.")
+    with ac2:
+        auto_strategy = st.selectbox(
+            "Auto rule", paper_trading.STRATEGIES,
+            index=paper_trading.STRATEGIES.index(cfg.PAPER_AUTO_STRATEGY)
+            if cfg.PAPER_AUTO_STRATEGY in paper_trading.STRATEGIES else 0,
+            key="paper_auto_strategy", label_visibility="collapsed",
+            help="composite: follow the bot's composite signal when it is strong enough to alert. "
+                 "model: trade toward the Kalshi fair-value model when its edge beats the fee.")
+    with ac3:
+        auto_contracts = st.number_input("Auto contracts", min_value=1, step=1, value=cfg.PAPER_AUTO_CONTRACTS,
+                                         key="paper_auto_contracts", label_visibility="collapsed")
+    if auto_on and not quote_ok:
+        st.caption("Auto-trade is waiting for the live KXBTC15M quote (Auto-track on, BTC-USD).")
+    elif auto_on:
+        auto_model_p = None
+        if kalshi_result["available"] and kalshi_result["strike"] == kalshi_live["strike"]:
+            auto_model_p = kalshi_result["p_yes"]
+        step = paper_trading.auto_step(
+            cfg, kalshi_live, kalshi_api.current_btc15m_market, auto_strategy, int(auto_contracts),
+            composite=snapshot.composite, strength=snapshot.strength,
+            alert_threshold=cfg.COMPOSITE_ALERT_THRESHOLD, model_p_yes=auto_model_p, spot=live_price)
+        if step["action"] == "traded":
+            t = step["trade"]
+            st.success(_esc(
+                f"Auto ({auto_strategy}): bought {t['contracts']} {t['side'].upper()} on `{t['ticker']}` at "
+                f"{t['price'] * 100:.1f}\u00a2 + ${t['fee']:.2f} fee -- {step['reason']}."))
+        else:
+            st.caption(_esc(f"Auto ({auto_strategy}): {step['reason']}."))
+    st.caption("Auto-trade places orders itself while this page is open; close the page and it stops. "
+               "Both rules are untested ideas, not recommendations -- see the per-rule results below.")
+
+    paper_trades = paper_trading.load_trades(cfg.PAPER_TRADE_LOG_PATH)
+    paper_sum = paper_trading.summarize(paper_trades, cfg.PAPER_MIN_SAMPLE, cfg.PAPER_NOISE_Z)
+    pm1, pm2, pm3, pm4 = st.columns(4)
+    with pm1:
+        st.metric("Net P&L", f"${paper_sum['net_pnl']:+,.2f}",
+                  f"{paper_sum['roi'] * 100:+.1f}% on ${paper_sum['staked']:,.2f}"
+                  if paper_sum["roi"] is not None else None)
+    with pm2:
+        st.metric("Won / lost", f"{paper_sum['wins']} / {paper_sum['losses']}",
+                  f"{paper_sum['n_open']} open" if paper_sum["n_open"] else None, delta_color="off")
+    with pm3:
+        st.metric("Win rate", f"{paper_sum['win_rate'] * 100:.1f}%" if paper_sum["win_rate"] is not None else "--",
+                  f"break-even {paper_sum['breakeven_rate'] * 100:.1f}%"
+                  if paper_sum["breakeven_rate"] is not None else None, delta_color="off")
+    with pm4:
+        st.metric("Fees paid", f"${paper_sum['fees']:,.2f}")
+    if paper_sum["n_settled"]:
+        st.caption(_esc(
+            f"{paper_trading.VERDICT_TEXT[paper_sum['verdict']]} "
+            f"({paper_sum['n_markets']} settled market(s); win rate "
+            f"\u00b1{paper_sum['win_rate_se'] * 100:.1f} pts, 1 SE.)"))
+
+    by_source = paper_trading.summarize_by_source(paper_trades, cfg.PAPER_MIN_SAMPLE, cfg.PAPER_NOISE_Z)
+    if len(by_source) > 1 or any(src != paper_trading.MANUAL for src in by_source):
+        st.dataframe(pd.DataFrame([
+            {"placed by": src, "settled": ss["n_settled"], "open": ss["n_open"],
+             "net P&L": f"${ss['net_pnl']:+,.2f}",
+             "win rate": f"{ss['win_rate'] * 100:.1f}%" if ss["win_rate"] is not None else "",
+             "break-even": f"{ss['breakeven_rate'] * 100:.1f}%" if ss["breakeven_rate"] is not None else "",
+             "read": paper_trading.VERDICT_TEXT[ss["verdict"]]}
+            for src, ss in by_source.items()]), width="stretch", hide_index=True)
+
+    if paper_trades:
+        now_utc = paper_trading.utcnow()
+
+        def _paper_row(t):
+            closes = paper_trading.parse_time(t["close_time"])
+            if t["status"] == "settled":
+                state_text = "WON" if t["side"] == t["outcome"] else "LOST"
+            else:
+                state_text = "awaiting result" if closes and closes <= now_utc else "open"
+            return {
+                "opened (UTC)": (paper_trading.parse_time(t["opened_at"]) or now_utc).strftime("%m-%d %H:%M:%S"),
+                "contract": t["ticker"], "by": t["source"], "side": t["side"].upper(), "qty": t["contracts"],
+                "paid": f"{t['price'] * 100:.1f}\u00a2", "fee": f"${t['fee']:.2f}",
+                "state": state_text,
+                "P&L": f"${t['pnl']:+,.2f}" if t["pnl"] is not None else "",
+            }
+        st.dataframe(pd.DataFrame([_paper_row(t) for t in reversed(paper_trades[-50:])]),
+                     width="stretch", hide_index=True)
+    else:
+        st.caption("No paper trades yet -- pick a size and buy a side above.")
+    st.caption(_esc(paper_trading.LIMITS_NOTE))
 
 with tab_notes, st.container(height=TAB_BODY_HEIGHT, border=False):
     note_left, note_right = st.columns(2)

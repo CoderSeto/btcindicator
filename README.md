@@ -91,6 +91,67 @@ Both options share the same alert threshold logic and the same
 `alerts_log.csv` — you can run either one (or switch between them) without
 losing your alert history.
 
+## Paper trading the Kalshi 15-minute contracts
+
+The dashboard's **Paper trading** tab simulates orders on the currently open
+KXBTC15M contract and settles them on Kalshi's real result. No money, account
+or key is involved.
+
+1. Leave **Auto-track** on (BTC-USD) so the tab has the live quote.
+2. Pick a number of contracts and press **Buy YES** or **Buy NO**. The button
+   shows the price you would pay.
+3. Come back after the contract closes. It settles by itself on the next
+   refresh (Kalshi usually publishes the result within a minute of close), and
+   the tab shows net P&L, won/lost, fees paid and your win rate next to the
+   win rate you needed to break even.
+
+### Automatic mode
+
+Tick **Auto-trade** on the tab and the dashboard places orders for you: one
+position per market, on the first refresh between `PAPER_AUTO_ENTRY_MINUTES`
+(default 5) and `PAPER_AUTO_LAST_MINUTES` (default 2) before close where the
+rule says to trade. Pick the rule in the dropdown:
+
+- **composite** follows the bot's own composite signal when it is strong enough
+  to raise an alert (the sidebar's alert threshold): bullish buys YES, bearish
+  buys NO, neutral does nothing.
+- **model** trades toward the Kalshi fair-value model when its edge over the
+  price, after the fee, beats `PAPER_AUTO_MODEL_MARGIN`. This is the exact
+  rule the edge study tested, and it lost money there.
+
+Things to know:
+
+- It only trades **while the dashboard page is open and refreshing**. Close the
+  tab, or let the machine sleep, and it stops. Keep the refresh interval well
+  under the 3-minute window.
+- The checkbox is per browser session and starts at `PAPER_AUTO_ENABLED`
+  (off). Reopening the page does not resume it unless you change that setting.
+- It orders at a fresh quote and re-checks the rule on it, and several tabs
+  open at once still place one order per market.
+- Automatic orders are tagged `auto:<rule>` in the ledger and shown in their own
+  row of the results table, so the rule's record is never mixed with your hand-
+  placed trades. Judge a rule on a large sample: with fewer than
+  `PAPER_MIN_SAMPLE` settled markets the table says it can't tell skill from
+  luck.
+
+Fills are deliberately unflattering: YES is bought at the **ask**, NO at
+**1 - the bid**, and Kalshi's taker fee is charged (rounded up to the cent per
+order). Settlement uses Kalshi's own recorded result, so basis risk against
+the CF Benchmarks index is in your results, as it would be for a real position.
+Not modelled: the size available at the quote (keep orders small), latency, and
+the price moving while you decide.
+
+Expect it to lose at first. The edge study (`REVIEW_FINDINGS.md`, "Is there an
+edge?") found nothing that beat these costs across 30,688 past contracts. The
+tab says when a result is too small a sample to mean anything (fewer than
+`PAPER_MIN_SAMPLE` settled markets) or inside the noise, so a lucky streak
+isn't mistaken for skill.
+
+Everything is kept in `paper_trades.csv` (an append-only event log: an "open"
+row per order and a "settle" row per result). `python paper_trading.py` settles
+anything due and prints the same summary in the terminal. Delete the file to
+start a fresh account.
+
 ## Files
 
 | File | Purpose |
@@ -114,6 +175,7 @@ losing your alert history.
 | `kalshi.py` | Fair-value probability calculator for Kalshi's KXBTC15M-style binary contracts. Runs standalone (`python kalshi.py --strike ... --minutes ...`) or from the dashboard. |
 | `kalshi_api.py` | Public (no-auth) client for Kalshi's own market data API -- auto-discovers the currently open KXBTC15M contract's strike, close time, and quoted price. Run standalone (`python kalshi_api.py`) to sanity-check connectivity. |
 | `kalshi_tracking.py` | Logs fair-value predictions and checks them against real settled outcomes, to measure calibration empirically. Run standalone (`python kalshi_tracking.py`) once you've accumulated some tracked predictions. |
+| `paper_trading.py` | Paper trading for KXBTC15M: simulated taker orders (at the ask, with Kalshi's fee), settled on the real result, kept in `paper_trades.csv`. Runs standalone (`python paper_trading.py`) for a terminal report. |
 | `app.py` | The Streamlit dashboard itself. |
 | `tests/` | Pytest suite covering the order-book math (cross-validated against brute-force references), every exchange payload parser (against the exchanges' own documented examples), the Binance sequence-gap handling, and the CSV log schema. Run with `pytest`. |
 
