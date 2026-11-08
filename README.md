@@ -26,6 +26,10 @@ On Windows with more than one Python installed, go through the `py`
 launcher so you hit the interpreter that actually has these dependencies:
 `py -m pip install -r requirements.txt` then `py -m streamlit run app.py`.
 
+`requirements.txt` gives minimum versions. To install the exact versions the test
+suite last passed with, use `requirements-lock.txt` instead:
+`py -m pip install -r requirements-lock.txt`.
+
 This opens a browser tab at `http://localhost:8501` on its own. The layout is
 built to fit one screen -- the live state is always visible, and the price
 chart is the one panel you scroll for:
