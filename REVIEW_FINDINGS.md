@@ -544,8 +544,8 @@ The least-bad cells are late entries with long holds (5 / 3). They are also the 
 **forced holds**: 15.8% of train entries and 4.4% of held-out ones had no sellable book at the exit
 (2 minutes before close) and were held to settlement, paying one fee and no exit spread. So part of
 their relative improvement is escaping the second leg of the cost, not skill, and the edge study
-already found holding to settlement loses too. Forced holds are 0.2-0.7% at entry 10 and 1.8-5.3%
-at entry 5 for 1-2 minute holds.
+already found holding to settlement loses too. Across all contracts, forced holds are 0.2-0.4%
+at entry 10, and 1.8-5.3% at entry 5 for 1-2 minute holds (14.0% at 3 minutes).
 
 ### What this does and does not rule out
 
