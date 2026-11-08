@@ -241,6 +241,7 @@ def parse_orderbook(payload: dict) -> dict:
     `no` the resting NO bids. A YES ask is the mirror of a NO bid, so
     yes_ask = 1 - best NO bid, with the NO bid's quantity as its size.
 
+    Payload may be wrapped as `orderbook_fp` (seen live, 2026-11-08) or `orderbook`.
     Accepts either the dollar-string form (`yes_dollars` / `no_dollars`,
     [["0.56", "100"], ...]) or the integer-cent form (`yes` / `no`,
     [[56, 100], ...]), preferring dollars. Returns
@@ -249,7 +250,7 @@ def parse_orderbook(payload: dict) -> dict:
     """
     if not isinstance(payload, dict):
         raise KalshiSchemaError("orderbook payload is not an object")
-    book = payload.get("orderbook", payload)
+    book = payload.get("orderbook_fp") or payload.get("orderbook") or payload
     if not isinstance(book, dict):
         raise KalshiSchemaError("'orderbook' is not an object")
     if "yes_dollars" in book or "no_dollars" in book:

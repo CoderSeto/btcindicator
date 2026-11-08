@@ -50,6 +50,16 @@ def test_parse_orderbook_cents_and_dollars_agree_and_mirror_no_bid():
         assert q["yes_ask"] == pytest.approx(0.57) and q["yes_ask_size"] == 20
 
 
+def test_parse_orderbook_live_orderbook_fp_wrapper():
+    # shape captured live from the user's machine (ascending bids, empty NO side)
+    q = kalshi_api.parse_orderbook({"orderbook_fp": {"no_dollars": [], "yes_dollars": [
+        ["0.9900", "648.05"], ["0.9910", "520.00"], ["0.9950", "3746.52"]]}})
+    assert q == {"yes_bid": 0.995, "yes_bid_size": 3746.52, "yes_ask": None, "yes_ask_size": None}
+    q = kalshi_api.parse_orderbook({"orderbook_fp": {"no_dollars": [["0.3000", "10"], ["0.4000", "5"]],
+                                                    "yes_dollars": [["0.5000", "2"]]}})
+    assert q["yes_ask"] == 0.6 and q["yes_ask_size"] == 5.0 and q["yes_bid"] == 0.5
+
+
 def test_parse_orderbook_empty_sides_are_none_not_zero():
     q = kalshi_api.parse_orderbook({"orderbook": {"yes": [], "no": [[30, 1]]}})
     assert q["yes_bid"] is None and q["yes_bid_size"] is None
