@@ -1030,3 +1030,67 @@ def test_a_resolved_position_is_settled_and_counted_on_the_next_refresh(env, mon
     assert "Too few settled markets" in all_text(at)                            # n = 1 is flagged, not trusted
     at.run()
     assert sum(r["event"] == "settle" for r in paper_rows()) == 1
+
+
+def test_auto_trade_is_off_unless_switched_on(env, monkeypatch):
+    monkeypatch.setattr(cfg, "PAPER_AUTO_ENTRY_MINUTES", 10.0)           # NOW is 7.5 min before close: inside the window
+    at = run()
+    no_exception(at)
+    assert at.checkbox(key="paper_auto").value is False
+    assert not os.path.exists(cfg.PAPER_TRADE_LOG_PATH)
+
+
+def test_auto_trade_follows_the_composite_once_per_market(env, monkeypatch):
+    monkeypatch.setattr(cfg, "PAPER_AUTO_ENTRY_MINUTES", 10.0)
+    at = run()
+    assert "BEARISH" in metric(at, "Composite").value and metric(at, "Composite").delta.startswith("3/")
+    at.checkbox(key="paper_auto").check().run()
+    no_exception(at)
+    (row,) = paper_rows()
+    assert (row["source"], row["side"], row["price"], row["composite"]) == ("auto:composite", "no", "0.57", "bearish")
+    assert "Auto (composite): bought 1 NO" in all_text(at)
+    at.run()
+    at.run()
+    assert len(paper_rows()) == 1                                         # refreshes never re-enter the market
+    assert "already traded this market" in all_text(at)
+    sources = [df.value for df in at.dataframe if "placed by" in df.value.columns][0]
+    assert sources["placed by"].tolist() == ["auto:composite"]
+
+
+def test_auto_trade_waits_for_its_entry_window(env):
+    at = run()
+    at.checkbox(key="paper_auto").check().run()
+    no_exception(at)
+    assert not os.path.exists(cfg.PAPER_TRADE_LOG_PATH)                   # 7.5 min left, entry opens at 5
+    assert "enters at 5 min left (7.5 left now)" in all_text(at)
+
+
+def test_auto_trade_respects_the_alert_threshold(env, monkeypatch):
+    monkeypatch.setattr(cfg, "PAPER_AUTO_ENTRY_MINUTES", 10.0)
+    at = run()
+    at.sidebar.slider[1].set_value(5)                                     # alert threshold: 3 aligned is no longer enough
+    at.run()
+    at.checkbox(key="paper_auto").check().run()
+    no_exception(at)
+    assert not os.path.exists(cfg.PAPER_TRADE_LOG_PATH)
+    assert "only 3 aligned" in all_text(at)
+
+
+def test_auto_trade_without_a_live_quote_says_so_and_places_nothing(env, monkeypatch):
+    monkeypatch.setattr(cfg, "PAPER_AUTO_ENTRY_MINUTES", 10.0)
+    env.kalshi = {"available": False, "reason": "Couldn't reach Kalshi's API: offline"}
+    at = run()
+    at.checkbox(key="paper_auto").check().run()
+    no_exception(at)
+    assert "Auto-trade is waiting for the live KXBTC15M quote" in all_text(at)
+    assert not os.path.exists(cfg.PAPER_TRADE_LOG_PATH)
+
+
+def test_a_manual_order_beside_an_auto_one_shows_each_rules_results(env, monkeypatch):
+    monkeypatch.setattr(cfg, "PAPER_AUTO_ENTRY_MINUTES", 10.0)
+    at = run()
+    at.button(key="paper_buy_yes").click().run()
+    at.checkbox(key="paper_auto").check().run()
+    assert [r["source"] for r in paper_rows()] == ["manual", "auto:composite"]
+    sources = [df.value for df in at.dataframe if "placed by" in df.value.columns][0]
+    assert sources["placed by"].tolist() == ["manual", "auto:composite"]

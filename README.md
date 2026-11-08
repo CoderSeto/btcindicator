@@ -105,6 +105,35 @@ or key is involved.
    the tab shows net P&L, won/lost, fees paid and your win rate next to the
    win rate you needed to break even.
 
+### Automatic mode
+
+Tick **Auto-trade** on the tab and the dashboard places orders for you: one
+position per market, on the first refresh between `PAPER_AUTO_ENTRY_MINUTES`
+(default 5) and `PAPER_AUTO_LAST_MINUTES` (default 2) before close where the
+rule says to trade. Pick the rule in the dropdown:
+
+- **composite** follows the bot's own composite signal when it is strong enough
+  to raise an alert (the sidebar's alert threshold): bullish buys YES, bearish
+  buys NO, neutral does nothing.
+- **model** trades toward the Kalshi fair-value model when its edge over the
+  price, after the fee, beats `PAPER_AUTO_MODEL_MARGIN`. This is the exact
+  rule the edge study tested, and it lost money there.
+
+Things to know:
+
+- It only trades **while the dashboard page is open and refreshing**. Close the
+  tab, or let the machine sleep, and it stops. Keep the refresh interval well
+  under the 3-minute window.
+- The checkbox is per browser session and starts at `PAPER_AUTO_ENABLED`
+  (off). Reopening the page does not resume it unless you change that setting.
+- It orders at a fresh quote and re-checks the rule on it, and several tabs
+  open at once still place one order per market.
+- Automatic orders are tagged `auto:<rule>` in the ledger and shown in their own
+  row of the results table, so the rule's record is never mixed with your hand-
+  placed trades. Judge a rule on a large sample: with fewer than
+  `PAPER_MIN_SAMPLE` settled markets the table says it can't tell skill from
+  luck.
+
 Fills are deliberately unflattering: YES is bought at the **ask**, NO at
 **1 - the bid**, and Kalshi's taker fee is charged (rounded up to the cent per
 order). Settlement uses Kalshi's own recorded result, so basis risk against

@@ -148,6 +148,17 @@ such, not slipped in quietly.
   reports the win rate against the break-even rate with its standard error
   (counting each market once) and flags small samples -- keep it that way.
   Not modelled, and the tab says so: size at the touch, latency.
+  Automatic mode (`auto_step()`, driven from the dashboard's refresh loop, so
+  it only trades while a page is open) enters once per market inside
+  `PAPER_AUTO_ENTRY_MINUTES`..`PAPER_AUTO_LAST_MINUTES` before close under one
+  of two rules in `decide()`: "composite" (follow the composite when it is
+  strong enough to alert) or "model" (calls `kalshi_study.model_trades`, the
+  study's own rule, not a copy). Trades carry a `source` column
+  ("manual" / "auto:<rule>") and `summarize_by_source()` keeps each rule's
+  record apart -- never pool them, and never present either rule as having
+  edge (principle 1; the study found none). Once-per-market is enforced by
+  `place_order(once_per_market=True)` through `append_row`'s locked `skip_if`,
+  so two open tabs place one order; the order is re-decided on a fresh quote.
 - `kalshi_study.py` -- the KXBTC15M edge study (REVIEW_FINDINGS.md, "Is
   there an edge?"): fetches and caches every settled market and its
   1-minute candlesticks, plus Coinbase 1-minute history, into

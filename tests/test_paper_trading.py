@@ -22,7 +22,8 @@ CLOSE = datetime(2026, 11, 7, 18, 15, tzinfo=timezone.utc)
 
 def _cfg(tmp_path):
     return SimpleNamespace(PAPER_TRADE_LOG_PATH=str(tmp_path / "paper.csv"),
-                           PAPER_MIN_SAMPLE=30, PAPER_NOISE_Z=2.0)
+                           PAPER_MIN_SAMPLE=30, PAPER_NOISE_Z=2.0, PAPER_AUTO_ENTRY_MINUTES=5.0,
+                           PAPER_AUTO_LAST_MINUTES=2.0, PAPER_AUTO_MODEL_MARGIN=0.02)
 
 
 def market(**over):
@@ -184,9 +185,9 @@ def test_a_settle_row_closes_its_open_row_and_only_once(tmp_path):
     blank = [""] * 12
     with open(cfg.PAPER_TRADE_LOG_PATH, "a", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["settle", tid, NOW.isoformat()] + blank + ["yes", 1.0, 0.54])
-        w.writerow(["settle", tid, NOW.isoformat()] + blank + ["no", 0.0, -0.46])      # a duplicate: ignored
-        w.writerow(["settle", "ghost", NOW.isoformat()] + blank + ["yes", 1.0, 0.5])   # no such trade: ignored
+        w.writerow(["settle", tid, NOW.isoformat()] + blank + ["yes", 1.0, 0.54, ""])
+        w.writerow(["settle", tid, NOW.isoformat()] + blank + ["no", 0.0, -0.46, ""])      # a duplicate: ignored
+        w.writerow(["settle", "ghost", NOW.isoformat()] + blank + ["yes", 1.0, 0.5, ""])   # no such trade: ignored
     (t,) = pt.load_trades(cfg.PAPER_TRADE_LOG_PATH)
     assert (t["status"], t["outcome"], t["payout"], t["pnl"]) == ("settled", "yes", 1.0, 0.54)
 
@@ -330,3 +331,197 @@ def test_report_states_the_limits_every_time(tmp_path):
     pt.place_order(cfg, market(), "yes", 1, now=NOW)
     text = pt.report(cfg)
     assert "1 placed, 1 open, 0 settled" in text and pt.LIMITS_NOTE in text
+
+
+# ---------- who placed it ----------
+
+def test_every_row_is_as_wide_as_the_header_and_manual_is_the_default_source(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    pt.place_order(cfg, market(), "yes", 1, now=NOW)
+    stub_results(monkeypatch, {"KXBTC15M-T1": "yes"})
+    pt.settle_due(cfg, now=CLOSE + timedelta(seconds=30))
+    with open(cfg.PAPER_TRADE_LOG_PATH, newline="") as f:
+        assert {len(r) for r in csv.reader(f)} == {len(pt.LEDGER_HEADER)}
+    assert rows(cfg)[0]["source"] == "manual"
+    assert pt.load_trades(cfg.PAPER_TRADE_LOG_PATH)[0]["source"] == "manual"
+
+
+def test_a_row_with_a_blank_source_reads_as_manual(tmp_path):
+    cfg = _cfg(tmp_path)
+    pt.place_order(cfg, market(), "yes", 1, now=NOW)
+    text = (tmp_path / "paper.csv").read_text().replace(",manual", ",")
+    (tmp_path / "paper.csv").write_text(text)
+    assert pt.load_trades(cfg.PAPER_TRADE_LOG_PATH)[0]["source"] == "manual"
+
+
+# ---------- the automatic rule ----------
+
+@pytest.mark.parametrize("composite, strength, threshold, side", [
+    ("bullish", 3, 3, "yes"),
+    ("bearish", 5, 3, "no"),
+    ("bullish", 2, 3, None),            # leaning, but not strong enough to alert
+    ("bearish", 2, 3, None),
+    ("neutral", 0, 3, None),
+    ("neutral", 9, 3, None),            # neutral never trades, whatever the number says
+])
+def test_composite_rule(composite, strength, threshold, side):
+    assert pt.decide("composite", composite, strength, threshold)[0] == side
+
+
+@pytest.mark.parametrize("p, side", [
+    (0.70, "yes"),      # 0.70 - 0.44 - 0.02 fee = 0.24 > margin
+    (0.30, "no"),       # 0.70 - 0.57 - 0.02 fee = 0.11 > margin
+    (0.50, "yes"),      # 0.50 - 0.44 - 0.02 fee = 0.04 > 0.02 margin
+    (0.46, None),       # 0.46 - 0.44 - 0.02 = 0: the spread and the fee eat a 2-point lean
+    (0.45, None),
+])
+def test_model_rule_by_hand(p, side):
+    assert pt.decide("model", model_p_yes=p, yes_bid=0.43, yes_ask=0.44, margin=0.02)[0] == side
+
+
+def test_model_rule_is_the_edge_studys_rule_over_random_quotes():
+    rng = np.random.default_rng(7)
+    for _ in range(500):
+        bid = round(float(rng.uniform(0.02, 0.9)), 2)
+        ask = round(min(0.98, bid + float(rng.uniform(0.01, 0.1))), 2)
+        p, margin, n = float(rng.uniform(0, 1)), float(rng.choice([0.0, 0.02, 0.05])), int(rng.choice([1, 5, 100]))
+        study, _ = kalshi_study.model_trades(p, bid, ask, 0, margin, n)
+        want = {1: "yes", -1: "no", 0: None}[int(study)]
+        assert pt.decide("model", model_p_yes=p, yes_bid=bid, yes_ask=ask, contracts=n, margin=margin)[0] == want
+
+
+def test_model_rule_without_a_probability_or_quote_does_not_trade():
+    assert pt.decide("model", yes_bid=0.4, yes_ask=0.5)[0] is None
+    assert pt.decide("model", model_p_yes=0.9, yes_bid=None, yes_ask=0.5)[0] is None
+
+
+def test_unknown_rule_is_an_error():
+    with pytest.raises(ValueError):
+        pt.decide("coinflip")
+
+
+# ---------- auto_step ----------
+
+def step(cfg, minutes_left, live=None, fetch=None, strategy="composite", **kw):
+    now = CLOSE - timedelta(minutes=minutes_left)
+    live = live or market()
+    kw = {"composite": "bullish", "strength": 4, "alert_threshold": 3, **kw}
+    return pt.auto_step(cfg, live, fetch or (lambda: live), strategy, 1, now=now, **kw)
+
+
+@pytest.mark.parametrize("minutes_left, action", [
+    (7.0, "waiting"), (5.01, "waiting"),           # before the window
+    (5.0, "traded"), (3.0, "traded"), (2.0, "traded"),
+    (1.99, "waiting"), (0.5, "waiting"),           # after it: too late to be the rule's entry
+])
+def test_entry_window(tmp_path, minutes_left, action):
+    cfg = _cfg(tmp_path)
+    assert step(cfg, minutes_left)["action"] == action
+    if action == "traded":
+        assert len(rows(cfg)) == 1
+    else:
+        assert not (tmp_path / "paper.csv").exists()
+
+
+def test_a_traded_window_is_tagged_with_its_rule_and_the_context(tmp_path):
+    cfg = _cfg(tmp_path)
+    res = step(cfg, 4.0, strategy="composite", spot=75_100.0, model_p_yes=0.4)
+    assert res["action"] == "traded" and res["trade"]["source"] == "auto:composite"
+    (o,) = rows(cfg)
+    assert (o["source"], o["side"], o["composite"], o["spot"], o["price"]) == ("auto:composite", "yes", "bullish", "75100.0", "0.44")
+    assert pt.load_trades(cfg.PAPER_TRADE_LOG_PATH)[0]["source"] == "auto:composite"
+
+
+def test_it_trades_a_market_once_however_often_it_is_called(tmp_path):
+    cfg = _cfg(tmp_path)
+    assert step(cfg, 4.5)["action"] == "traded"
+    for left in (4.0, 3.0, 2.5):
+        assert step(cfg, left)["action"] == "done"
+    assert len(rows(cfg)) == 1
+
+
+def test_a_different_rule_chosen_mid_window_does_not_double_up(tmp_path):
+    cfg = _cfg(tmp_path)
+    assert step(cfg, 4.0, strategy="composite")["action"] == "traded"
+    assert step(cfg, 3.5, strategy="model", model_p_yes=0.9)["action"] == "done"
+    assert len(rows(cfg)) == 1
+
+
+def test_a_new_market_gets_its_own_trade(tmp_path):
+    cfg = _cfg(tmp_path)
+    assert step(cfg, 4.0)["action"] == "traded"
+    nxt = market(ticker="KXBTC15M-T2", close_time=CLOSE + timedelta(minutes=15))
+    assert pt.auto_step(cfg, nxt, lambda: nxt, "composite", 1, composite="bearish", strength=4,
+                        now=CLOSE + timedelta(minutes=10))["action"] == "traded"
+    assert [r["side"] for r in rows(cfg)] == ["yes", "no"]
+
+
+def test_no_signal_means_no_order_and_no_extra_quote_fetch(tmp_path):
+    cfg = _cfg(tmp_path)
+    fetched = []
+    res = step(cfg, 4.0, fetch=lambda: fetched.append(1) or market(), composite="neutral", strength=0)
+    assert res["action"] == "no_signal" and fetched == []
+    assert not (tmp_path / "paper.csv").exists()
+    # and it keeps looking: the signal appearing later in the window still trades
+    assert step(cfg, 3.0)["action"] == "traded"
+
+
+def test_the_order_is_priced_on_the_fresh_quote(tmp_path):
+    cfg = _cfg(tmp_path)
+    moved = market(yes_bid=0.50, yes_ask=0.52)
+    step(cfg, 4.0, fetch=lambda: moved)
+    assert rows(cfg)[0]["price"] == "0.52"
+
+
+def test_a_stale_quote_cannot_place_a_trade_the_fresh_one_would_not(tmp_path):
+    cfg = _cfg(tmp_path)
+    live = market(yes_bid=0.43, yes_ask=0.44)             # model 70%: a clear YES on this quote
+    moved = market(yes_bid=0.68, yes_ask=0.69)            # the market caught up: no edge left
+    res = step(cfg, 4.0, live=live, fetch=lambda: moved, strategy="model", model_p_yes=0.70)
+    assert res["action"] == "no_signal" and "fresh quote" in res["reason"]
+    assert not (tmp_path / "paper.csv").exists()
+
+
+def test_two_tabs_deciding_at_once_place_one_order(tmp_path):
+    cfg = _cfg(tmp_path)
+    # Both tabs passed the has_auto_trade() pre-check before either wrote; the locked check decides.
+    first = pt.place_order(cfg, market(), "yes", 1, now=NOW, source="auto:composite", once_per_market=True)
+    second = pt.place_order(cfg, market(), "yes", 1, now=NOW, source="auto:composite", once_per_market=True)
+    assert first["ok"] and not second["ok"] and second["duplicate"]
+    assert len(rows(cfg)) == 1
+
+
+def test_manual_orders_are_never_blocked_by_an_automatic_one(tmp_path):
+    cfg = _cfg(tmp_path)
+    step(cfg, 4.0)
+    assert pt.place_order(cfg, market(), "no", 1, now=CLOSE - timedelta(minutes=3))["ok"]
+    assert [r["source"] for r in rows(cfg)] == ["auto:composite", "manual"]
+
+
+def test_no_market_is_reported_not_traded(tmp_path):
+    cfg = _cfg(tmp_path)
+    res = pt.auto_step(cfg, {"available": False, "reason": "No open KXBTC15M market found right now."},
+                       lambda: None, "composite", 1, composite="bullish", strength=5, now=NOW)
+    assert res["action"] == "blocked" and "No open" in res["reason"]
+
+
+# ---------- results by who placed the trade ----------
+
+def test_the_account_is_read_separately_for_manual_and_auto_trades():
+    trades = [dict(settled("A", "yes", 1, 0.40, 0.02, "yes"), source="manual"),       # +0.58
+              dict(settled("B", "yes", 1, 0.40, 0.02, "no"), source="auto:composite"),   # -0.42
+              dict(settled("C", "no", 1, 0.60, 0.02, "no"), source="auto:composite")]    # +0.38
+    by = pt.summarize_by_source(trades, min_sample=1)
+    assert list(by) == ["manual", "auto:composite"]
+    assert by["manual"]["net_pnl"] == pytest.approx(0.58) and by["manual"]["n_settled"] == 1
+    assert by["auto:composite"]["net_pnl"] == pytest.approx(-0.04) and by["auto:composite"]["n_markets"] == 2
+    assert by["auto:composite"]["win_rate"] == pytest.approx(0.5)
+    assert pt.summarize(trades)["net_pnl"] == pytest.approx(0.54)                        # the whole account is unchanged
+
+
+def test_report_lists_each_source(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    pt.place_order(cfg, market(), "yes", 1, now=NOW)
+    pt.place_order(cfg, market(ticker="KXBTC15M-T2"), "yes", 1, now=NOW, source="auto:model")
+    text = pt.report(cfg)
+    assert "manual: 1 open" in text and "auto:model: 1 open" in text

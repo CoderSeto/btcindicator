@@ -757,6 +757,44 @@ with tab_paper, st.container(height=TAB_BODY_HEIGHT, border=False):
         else:
             st.error(_esc(placed["reason"]))
 
+    ac1, ac2, ac3 = st.columns([1, 1, 1])
+    with ac1:
+        auto_on = st.checkbox(
+            "Auto-trade", value=cfg.PAPER_AUTO_ENABLED, key="paper_auto",
+            help=f"Enters one position per market, from {cfg.PAPER_AUTO_ENTRY_MINUTES:g} down to "
+                 f"{cfg.PAPER_AUTO_LAST_MINUTES:g} minutes before close, on the first refresh where the "
+                 "rule fires. Only trades while this page is open and refreshing.")
+    with ac2:
+        auto_strategy = st.selectbox(
+            "Auto rule", paper_trading.STRATEGIES,
+            index=paper_trading.STRATEGIES.index(cfg.PAPER_AUTO_STRATEGY)
+            if cfg.PAPER_AUTO_STRATEGY in paper_trading.STRATEGIES else 0,
+            key="paper_auto_strategy", label_visibility="collapsed",
+            help="composite: follow the bot's composite signal when it is strong enough to alert. "
+                 "model: trade toward the Kalshi fair-value model when its edge beats the fee.")
+    with ac3:
+        auto_contracts = st.number_input("Auto contracts", min_value=1, step=1, value=cfg.PAPER_AUTO_CONTRACTS,
+                                         key="paper_auto_contracts", label_visibility="collapsed")
+    if auto_on and not quote_ok:
+        st.caption("Auto-trade is waiting for the live KXBTC15M quote (Auto-track on, BTC-USD).")
+    elif auto_on:
+        auto_model_p = None
+        if kalshi_result["available"] and kalshi_result["strike"] == kalshi_live["strike"]:
+            auto_model_p = kalshi_result["p_yes"]
+        step = paper_trading.auto_step(
+            cfg, kalshi_live, kalshi_api.current_btc15m_market, auto_strategy, int(auto_contracts),
+            composite=snapshot.composite, strength=snapshot.strength,
+            alert_threshold=cfg.COMPOSITE_ALERT_THRESHOLD, model_p_yes=auto_model_p, spot=live_price)
+        if step["action"] == "traded":
+            t = step["trade"]
+            st.success(_esc(
+                f"Auto ({auto_strategy}): bought {t['contracts']} {t['side'].upper()} on `{t['ticker']}` at "
+                f"{t['price'] * 100:.1f}\u00a2 + ${t['fee']:.2f} fee -- {step['reason']}."))
+        else:
+            st.caption(_esc(f"Auto ({auto_strategy}): {step['reason']}."))
+    st.caption("Auto-trade places orders itself while this page is open; close the page and it stops. "
+               "Both rules are untested ideas, not recommendations -- see the per-rule results below.")
+
     paper_trades = paper_trading.load_trades(cfg.PAPER_TRADE_LOG_PATH)
     paper_sum = paper_trading.summarize(paper_trades, cfg.PAPER_MIN_SAMPLE, cfg.PAPER_NOISE_Z)
     pm1, pm2, pm3, pm4 = st.columns(4)
@@ -779,6 +817,16 @@ with tab_paper, st.container(height=TAB_BODY_HEIGHT, border=False):
             f"({paper_sum['n_markets']} settled market(s); win rate "
             f"\u00b1{paper_sum['win_rate_se'] * 100:.1f} pts, 1 SE.)"))
 
+    by_source = paper_trading.summarize_by_source(paper_trades, cfg.PAPER_MIN_SAMPLE, cfg.PAPER_NOISE_Z)
+    if len(by_source) > 1 or any(src != paper_trading.MANUAL for src in by_source):
+        st.dataframe(pd.DataFrame([
+            {"placed by": src, "settled": ss["n_settled"], "open": ss["n_open"],
+             "net P&L": f"${ss['net_pnl']:+,.2f}",
+             "win rate": f"{ss['win_rate'] * 100:.1f}%" if ss["win_rate"] is not None else "",
+             "break-even": f"{ss['breakeven_rate'] * 100:.1f}%" if ss["breakeven_rate"] is not None else "",
+             "read": paper_trading.VERDICT_TEXT[ss["verdict"]]}
+            for src, ss in by_source.items()]), width="stretch", hide_index=True)
+
     if paper_trades:
         now_utc = paper_trading.utcnow()
 
@@ -790,7 +838,7 @@ with tab_paper, st.container(height=TAB_BODY_HEIGHT, border=False):
                 state_text = "awaiting result" if closes and closes <= now_utc else "open"
             return {
                 "opened (UTC)": (paper_trading.parse_time(t["opened_at"]) or now_utc).strftime("%m-%d %H:%M:%S"),
-                "contract": t["ticker"], "side": t["side"].upper(), "qty": t["contracts"],
+                "contract": t["ticker"], "by": t["source"], "side": t["side"].upper(), "qty": t["contracts"],
                 "paid": f"{t['price'] * 100:.1f}\u00a2", "fee": f"${t['fee']:.2f}",
                 "state": state_text,
                 "P&L": f"${t['pnl']:+,.2f}" if t["pnl"] is not None else "",

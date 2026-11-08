@@ -23,6 +23,15 @@ latency between the quote and a real fill, and any price movement while you
 decide. Results are also small-sample: summarize() reports the noise on the
 win rate next to the break-even rate, so a lucky week isn't read as skill.
 
+Automatic mode (auto_step) opens one position per market on a fixed rule inside
+a time window before close, and tags those trades `auto:<strategy>` in the
+`source` column so the account can be read separately for hand-placed and
+rule-placed trades. It runs from the dashboard's refresh loop, so it only
+trades while a dashboard page is open. It is a way to collect a large sample
+under one fixed rule, NOT a claim that either rule works: the edge study found
+nothing that beat costs, and summarize_by_source() holds each rule to the same
+break-even and noise standard as hand-placed trades.
+
 The ledger is an append-only CSV of EVENTS, written only through
 csv_utils.append_row (gotcha #16): an "open" row when an order is placed and a
 "settle" row when its contract resolves. A position's state is the join of the
@@ -47,10 +56,12 @@ from csv_utils import append_row
 LEDGER_HEADER = [
     "event", "trade_id", "timestamp", "ticker", "side", "contracts", "price", "fee",
     "yes_bid", "yes_ask", "strike", "close_time", "spot", "model_p_yes", "composite",
-    "outcome", "payout", "pnl",
+    "outcome", "payout", "pnl", "source",
 ]
 
 SIDES = ("yes", "no")
+STRATEGIES = ("composite", "model")
+MANUAL = "manual"
 
 # A contract that has closed but isn't resolved yet (Kalshi settles a few
 # seconds to a few minutes after close) is re-checked at most this often.
@@ -155,6 +166,7 @@ def load_trades(path: str) -> list:
                 "spot": _num(e["spot"]),
                 "model_p_yes": _num(e["model_p_yes"]),
                 "composite": e["composite"] or None,
+                "source": e.get("source") or MANUAL,
                 "status": "open",
                 "outcome": None, "payout": None, "pnl": None, "settled_at": None,
             }
@@ -173,8 +185,15 @@ def parse_time(s):
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
+def has_auto_trade(path: str, ticker: str) -> bool:
+    """True if an automatic order has already been placed in this market, by any strategy."""
+    return any(e.get("event") == "open" and e.get("ticker") == ticker
+               and (e.get("source") or "").startswith("auto")
+               for e in _read_events(path))
+
+
 def place_order(cfg, market: dict, side: str, contracts: int, spot=None, model_p_yes=None,
-                composite=None, now=None) -> dict:
+                composite=None, now=None, source: str = MANUAL, once_per_market: bool = False) -> dict:
     """
     Simulates one taker order against `market` (a kalshi_api.parse_market
     result, ideally fetched just now rather than from the poll cache) and
@@ -184,6 +203,11 @@ def place_order(cfg, market: dict, side: str, contracts: int, spot=None, model_p
     `spot`, `model_p_yes` and `composite` are context recorded with the trade
     so it can be studied later (did the signals agree with the trades? did the
     model's gap to the market mean anything?). They never affect the fill.
+
+    `source` tags who placed it ("manual", or "auto:<strategy>"). With
+    `once_per_market`, the order is refused (`duplicate: True`) if an automatic
+    order already exists in this market -- checked under the ledger's file lock,
+    so two dashboard tabs reaching the same decision at the same moment place one.
     """
     now = now or utcnow()
     if side not in SIDES:
@@ -209,14 +233,18 @@ def place_order(cfg, market: dict, side: str, contracts: int, spot=None, model_p
         spot if spot is not None else "",
         model_p_yes if model_p_yes is not None else "",
         composite or "",
-        "", "", "",
+        "", "", "", source,
     ]
-    if not append_row(cfg.PAPER_TRADE_LOG_PATH, LEDGER_HEADER, row):
-        return {"ok": False, "reason": f"Couldn't write {cfg.PAPER_TRADE_LOG_PATH} (see the console)."}
+    path = cfg.PAPER_TRADE_LOG_PATH
+    skip_if = (lambda: has_auto_trade(path, market["ticker"])) if once_per_market else None
+    if not append_row(path, LEDGER_HEADER, row, skip_if=skip_if):
+        if once_per_market and has_auto_trade(path, market["ticker"]):
+            return {"ok": False, "duplicate": True, "reason": "Already traded this market automatically."}
+        return {"ok": False, "reason": f"Couldn't write {path} (see the console)."}
     return {"ok": True, "trade": {
         "trade_id": trade_id, "ticker": market["ticker"], "side": side, "contracts": contracts,
         "price": price, "fee": fee, "cost": round(price * contracts + fee, 4),
-        "strike": market["strike"], "close_time": market["close_time"],
+        "strike": market["strike"], "close_time": market["close_time"], "source": source,
     }}
 
 
@@ -254,12 +282,96 @@ def settle_due(cfg, now=None, retry_seconds: float = SETTLE_RETRY_SECONDS) -> in
         if result not in SIDES:
             continue
         s = settlement(t["side"], t["contracts"], t["price"], t["fee"], result)
-        row = ["settle", t["trade_id"], now.isoformat()] + [""] * 12 + [result, s["payout"], s["pnl"]]
+        row = ["settle", t["trade_id"], now.isoformat()] + [""] * 12 + [result, s["payout"], s["pnl"], ""]
         # skip_if runs under the file lock, so a second tab settling the same
         # trade at the same moment can't write it twice.
         if append_row(path, LEDGER_HEADER, row, skip_if=lambda tid=t["trade_id"]: tid in _settled_ids(path)):
             settled += 1
     return settled
+
+
+# --- automatic mode ----------------------------------------------------------
+
+def decide(strategy: str, composite=None, strength=0, alert_threshold=3, model_p_yes=None,
+           yes_bid=None, yes_ask=None, contracts: int = 1, margin: float = 0.0):
+    """
+    The automatic rule: (side, why) with side "yes", "no" or None.
+
+    "composite" follows the bot's own composite signal, but only when it is
+    strong enough to raise an alert (`strength >= alert_threshold`): bullish ->
+    YES, bearish -> NO, neutral or weaker -> no trade.
+
+    "model" trades toward the Kalshi fair-value model when its edge over the
+    price paid, net of the fee, exceeds `margin`. It IS the rule the edge
+    study tested (kalshi_study.model_trades is called, not re-implemented), and
+    the study found it loses. The two are never combined into one number
+    (design principle 1): pick one.
+    """
+    if strategy == "composite":
+        if composite not in ("bullish", "bearish"):
+            return None, "composite is neutral"
+        if strength < alert_threshold:
+            return None, f"composite {composite} but only {strength} aligned (alert threshold {alert_threshold})"
+        return ("yes" if composite == "bullish" else "no"), f"composite {composite}, {strength} aligned"
+    if strategy == "model":
+        if model_p_yes is None or yes_bid is None or yes_ask is None:
+            return None, "no model probability or no two-sided quote"
+        side, _ = kalshi_study.model_trades(model_p_yes, yes_bid, yes_ask, 0, margin, contracts)
+        side = int(side)
+        if side == 0:
+            return None, f"model {model_p_yes * 100:.0f}% has no edge over the price after the fee"
+        return ("yes" if side == 1 else "no"), f"model {model_p_yes * 100:.0f}% beats the price by more than the fee"
+    raise ValueError(f"strategy must be one of {STRATEGIES}, not {strategy!r}")
+
+
+def auto_step(cfg, live_market: dict, fetch_market, strategy: str, contracts: int, composite=None,
+              strength=0, alert_threshold=3, model_p_yes=None, spot=None, now=None) -> dict:
+    """
+    One look at the automatic rule; call it on every dashboard refresh.
+    Returns {"action": ..., "reason": ...} where action is "traded" (with
+    "trade"), "waiting" (outside the entry window), "done" (already traded
+    this market), "no_signal" or "blocked" (no market, or the order was
+    refused).
+
+    It enters at most once per market, the first refresh inside the window
+    (cfg.PAPER_AUTO_ENTRY_MINUTES down to PAPER_AUTO_LAST_MINUTES before
+    close) where the rule says to trade. The decision is made on the polled
+    quote, and if it says trade the order is priced on `fetch_market()`'s fresh
+    quote and the rule is re-checked on it, so a stale quote can't place a
+    trade the fresh one wouldn't.
+    """
+    now = now or utcnow()
+    if not live_market.get("available"):
+        return {"action": "blocked", "reason": live_market.get("reason", "no open market")}
+    ticker = live_market["ticker"]
+    minutes = (live_market["close_time"] - now).total_seconds() / 60.0
+    if minutes > cfg.PAPER_AUTO_ENTRY_MINUTES:
+        return {"action": "waiting", "reason": f"enters at {cfg.PAPER_AUTO_ENTRY_MINUTES:g} min left "
+                                               f"({minutes:.1f} left now)"}
+    if minutes < cfg.PAPER_AUTO_LAST_MINUTES:
+        return {"action": "waiting", "reason": f"window for this market has passed ({minutes:.1f} min left; "
+                                               f"enters {cfg.PAPER_AUTO_ENTRY_MINUTES:g}-"
+                                               f"{cfg.PAPER_AUTO_LAST_MINUTES:g} min before close)"}
+    if has_auto_trade(cfg.PAPER_TRADE_LOG_PATH, ticker):
+        return {"action": "done", "reason": "already traded this market"}
+
+    margin = getattr(cfg, "PAPER_AUTO_MODEL_MARGIN", 0.0)
+    side, why = decide(strategy, composite, strength, alert_threshold, model_p_yes,
+                       live_market.get("yes_bid"), live_market.get("yes_ask"), contracts, margin)
+    if side is None:
+        return {"action": "no_signal", "reason": why}
+
+    fresh = fetch_market()
+    if fresh.get("available") and fresh["ticker"] == ticker:
+        side, why = decide(strategy, composite, strength, alert_threshold, model_p_yes,
+                           fresh.get("yes_bid"), fresh.get("yes_ask"), contracts, margin)
+        if side is None:
+            return {"action": "no_signal", "reason": f"on the fresh quote: {why}"}
+    placed = place_order(cfg, fresh, side, contracts, spot=spot, model_p_yes=model_p_yes,
+                         composite=composite, now=now, source=f"auto:{strategy}", once_per_market=True)
+    if placed["ok"]:
+        return {"action": "traded", "reason": why, "trade": placed["trade"]}
+    return {"action": "done" if placed.get("duplicate") else "blocked", "reason": placed["reason"]}
 
 
 # --- reporting ---------------------------------------------------------------
@@ -308,6 +420,12 @@ def summarize(trades: list, min_sample: int = 30, noise_z: float = 2.0) -> dict:
     return out
 
 
+def summarize_by_source(trades: list, min_sample: int = 30, noise_z: float = 2.0) -> dict:
+    """{source: summarize(...)} -- "manual", "auto:composite", "auto:model" -- for the sources present."""
+    sources = list(dict.fromkeys(t["source"] for t in trades))
+    return {src: summarize([t for t in trades if t["source"] == src], min_sample, noise_z) for src in sources}
+
+
 VERDICT_TEXT = {
     "none": "Nothing has settled yet.",
     "small_sample": "Too few settled markets to tell skill from luck.",
@@ -338,6 +456,16 @@ def report(cfg) -> str:
             f"(+/-{s['win_rate_se'] * 100:.1f} pts, 1 SE) vs break-even {s['breakeven_rate'] * 100:.1f}%.",
             VERDICT_TEXT[s["verdict"]],
         ]
+    by_source = summarize_by_source(trades, cfg.PAPER_MIN_SAMPLE, cfg.PAPER_NOISE_Z)
+    if len(by_source) > 1:
+        lines.append("")
+        for src, ss in by_source.items():
+            if ss["n_settled"]:
+                lines.append(f"  {src}: {ss['n_settled']} settled, net ${ss['net_pnl']:+,.2f}, win rate "
+                             f"{ss['win_rate'] * 100:.1f}% vs break-even {ss['breakeven_rate'] * 100:.1f}%"
+                             f" ({VERDICT_TEXT[ss['verdict']]})")
+            else:
+                lines.append(f"  {src}: {ss['n_open']} open, none settled yet")
     lines += ["", LIMITS_NOTE]
     return "\n".join(lines)
 

@@ -279,3 +279,21 @@ PAPER_MIN_SAMPLE = 30
 # The win rate has to beat the break-even rate by this many standard errors
 # before the summary calls it anything but noise.
 PAPER_NOISE_Z = 2.0
+# Automatic mode: on every dashboard refresh inside the window below, enter ONE
+# position per market if the rule says to trade. It runs from the dashboard, so
+# it only trades while a dashboard page is open (and refreshing). This is only
+# the checkbox's starting value; the Paper trading tab can switch it per session.
+PAPER_AUTO_ENABLED = False
+# "composite": follow the bot's composite signal when it is strong enough to
+# alert (the sidebar's alert threshold): bullish -> YES, bearish -> NO.
+# "model": trade toward the Kalshi fair-value model when its edge over the
+# price, after the fee, exceeds PAPER_AUTO_MODEL_MARGIN -- the rule the edge
+# study tested and found loses money. Neither is a recommendation.
+PAPER_AUTO_STRATEGY = "composite"
+# Enter from this many minutes before close (the first refresh at or below it
+# where the rule fires), but not later than PAPER_AUTO_LAST_MINUTES before
+# close. Keep the dashboard's refresh interval well under the gap between them.
+PAPER_AUTO_ENTRY_MINUTES = 5.0
+PAPER_AUTO_LAST_MINUTES = 2.0
+PAPER_AUTO_CONTRACTS = 1
+PAPER_AUTO_MODEL_MARGIN = 0.02
