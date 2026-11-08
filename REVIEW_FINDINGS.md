@@ -19,9 +19,14 @@ Windows. Two portability bugs were fixed there: a test read `app.py` as cp1252, 
 caches `/candles` for ~5 minutes, so the header and Kalshi spot could be 5 minutes stale. Spot now comes
 from `/ticker`, and live candle requests send a time range so they skip that cache.
 
-**Edge study (2026-11-08):** is there a tradeable edge in Kalshi's KXBTC15M contracts? Step 2 says
-**not in the market's own prices**: 30,688 contracts, 120 pre-registered cells, none survives costs on
-the training data. Details in the section "Is there an edge?" at the end.
+**Edge study (2026-11-08):** is there a tradeable edge in Kalshi's KXBTC15M contracts? **No.**
+Step 2: none of 120 pre-registered cells of the market's own prices survives costs on 30,688
+contracts. Step 3: the dashboard's fair-value model never beats Kalshi's mid. It is significantly worse at
+every horizon on train and at 5 and 2 minutes on held-out data, and none of 36 ways of trading
+toward it is selected. Step 4 was therefore not
+triggered. Step 3 also found that Kalshi's own records hold two strikes scaled by 10⁻⁴, which the
+live dashboard would price as P(YES) = 100% (a guard is recommended, not yet added). Details in the
+section "Is there an edge?" at the end.
 
 **Second follow-up:** five more items are done: T1 (feed-parser tests), known item 2
 (configured column names), D5 (forming candle), D10 (Kalshi poll) and D16 (deprecated API).
@@ -184,7 +189,7 @@ Not one of the 120 cells passes the selection rule, so nothing goes to the held-
 claim. Step 3 (does `kalshi.settlement_probability` beat the market?) follows below.
 
 Code: `kalshi_study.py` (tested: `tests/test_kalshi_study.py`, `tests/test_kalshi_study_model.py`).
-Analysis: `python review/kalshi_market_study.py fetch|step2|step3`. Raw data is cached in
+Analysis: `python review/kalshi_market_study.py fetch|step2|step3|sources`. Raw data is cached in
 `study_data/` (gitignored).
 
 ### Design, fixed before any outcome was seen
@@ -194,9 +199,17 @@ had been fetched, and amended twice before any outcome had been looked at (only 
 seen, enough to notice that December 2025 books were thin). The amendments are labelled in the
 docstring.
 
-- **Data.** Every settled KXBTC15M market Kalshi lists: 31,046 markets, of which 30,688 settled yes
-  or no, closing 2025-12-15 → 2026-11-08 UTC. Markets settled before `/historical/cutoff` come from
-  `/historical/`. 84 contracts have no candles at any endpoint.
+- **Data.** Kalshi lists 31,046 settled KXBTC15M markets, opening from 2025-12-10. All settled yes
+  or no, but 358 have no `floor_strike` in Kalshi's record: every market from 2025-12-10 to 12-15,
+  plus a scattered few up to 2026-08-14. Those are dropped, so the **30,688 contracts studied close
+  2025-12-15 → 2026-11-08 UTC**. (An earlier message gave 2025-12-10; that was the first listed
+  open, not the first studied close.) 84 contracts have no candles at any endpoint.
+- **Two candle sources.** Markets settled before `/historical/cutoff` (2026-09-08) come from the
+  per-market `/historical/` endpoint: all of train, and held-out contracts up to the cutoff (3,250
+  at 2 minutes). Later ones come from the batch endpoint. **The two agree.** For 50 markets both
+  serve, closing 2026-09-01 → 09-07, bid and ask are identical at all 150 contract-horizons
+  (`python review/kalshi_market_study.py sources`). Train-vs-test differences below are not a
+  data-source artifact.
 - **Split.** Chronological. Contracts closing from 2026-08-02 21:00 UTC (the last 30%, 9,207
   contracts, 99 days) are held out. Training is the first 21,481 contracts over 231 days.
 - **One observation per contract per horizon** (10, 5 and 2 minutes before close). Each is the quote
@@ -271,6 +284,13 @@ is not significant at 10 or 5 minutes, and at 2 minutes it has reversed: prices 
 pattern that flips sign out of sample is not an edge. Either way it is worth at most a few cents on
 the extreme buckets, which is about what the spread and fee take.
 
+**The held-out 2-minute reversal (slope 0.921) is a hypothesis, not a finding.** It was found by
+looking at held-out data, so this dataset can't test it. It can only be tested forward, on new
+contracts, in pre-registered paper trading. It is not a data-source artifact: the slope is below 1
+both before the cutoff (0.876 ± 0.023, n 3,250, `/historical/`) and after it (0.953 ± 0.020,
+n 5,438, batch). By calendar month it is 0.906 ± 0.027 for August and 0.928 ± 0.019 for
+September–November.
+
 ### Exclusions and whether they depend on the outcome
 
 Rows are dropped for three reasons: no candle at that exact minute (`no_quote`), a missing side
@@ -300,7 +320,127 @@ rates, with z against the family threshold of 3.62:
 No gap is significant, and none is large enough to move a bucket's YES rate by more than a fraction
 of its interval.
 
-### Limits
+### Step 3 result: the model is worse than the market, and trading toward it loses
+
+**Question:** does `kalshi.settlement_probability`, fed Coinbase prices the way the dashboard feeds
+it, beat Kalshi's own mid? **No.** The market mid scores better at every horizon on train. On
+held-out data it scores better at 5 and 2 minutes, and at 10 minutes the basis-adjusted model is
+indistinguishable from it. The model is never better. None of the 36 trading variants is selected
+on train.
+
+**Setup.** For each contract and horizon:
+
+- **Spot** is the close of the Coinbase 1-minute candle that *started* a minute before the horizon.
+  Tests pin that the candle starting at the horizon is never used.
+- **Vol** is the realized vol of the prior 120 one-minute returns, via the dashboard's own
+  `kalshi.realized_volatility`.
+- **Two spot variants:** raw Coinbase, and "basis-adjusted". The adjusted one rescales spot by
+  strike ÷ (the Coinbase proxy for the strike's own 60-second average). That removes the
+  Coinbase-vs-index gap as it stood at open, using only what was known at open.
+- **Coverage.** Coinbase history is 471,969 candles with 467 minutes missing. The model could not
+  price 36–41 valid rows per horizon. Those don't depend on the outcome: the YES-vs-NO gap is at
+  most z 1.8 in size.
+
+**Scoring against the mid, on the same rows.** Each row is model minus market, so positive means the
+model is worse. Intervals use z = 3.62.
+
+| | n | Brier, market | Brier diff, raw | Brier diff, adjusted | Log-loss diff, adjusted |
+|---|---|---|---|---|---|
+| Train, 10 min | 21,216 | 0.1877 | +0.0022 [+0.0010, +0.0034] | +0.0022 [+0.0011, +0.0033] | +0.0066 [+0.0034, +0.0099] |
+| Train, 5 min | 20,807 | 0.1168 | +0.0040 [+0.0027, +0.0053] | +0.0041 [+0.0028, +0.0054] | +0.0136 [+0.0088, +0.0183] |
+| Train, 2 min | 17,217 | 0.0686 | +0.0063 [+0.0044, +0.0081] | +0.0060 [+0.0042, +0.0079] | +0.0195 [+0.0131, +0.0260] |
+| **Test, 10 min** | 9,207 | 0.1912 | +0.0020 [+0.0001, +0.0038] | +0.0015 [−0.0006, +0.0036] | +0.0049 [−0.0020, +0.0118] |
+| **Test, 5 min** | 9,207 | 0.1283 | +0.0046 [+0.0020, +0.0071] | +0.0044 [+0.0019, +0.0069] | +0.0165 [+0.0068, +0.0262] |
+| **Test, 2 min** | 8,688 | 0.0799 | +0.0071 [+0.0039, +0.0103] | +0.0066 [+0.0036, +0.0096] | +0.0298 [+0.0176, +0.0419] |
+
+- **Held-out:** the market is significantly better at 5 and 2 minutes on both metrics. At 10
+  minutes the raw model is worse and the adjusted one is not distinguishable from the market.
+- **The gap grows toward the close.** That is where Coinbase-vs-index noise and the
+  one-minute-old spot matter most.
+- **Basis adjustment helps marginally.** It improves log-loss by 0.0006–0.003, nowhere near enough to
+  catch the market.
+- **Calibration.** The adjusted model's calibration slope on train is 1.07, 1.20 and 1.32 at 10, 5
+  and 2 minutes: too close to 50%, more so near the close. On held-out it is 0.98, 1.01 and 0.92.
+- **Size of disagreement.** The model and the mid differ by 4–5¢ on average. That is the model's
+  noise, not edge.
+- **Counting.** These 24 intervals include the 12 train comparisons, which the 168-test family
+  counted only once. Counting all 24 gives 180 tests and z = 3.65. That moves only the borderline
+  raw-model 10-minute held-out interval to touching zero.
+
+**Trading toward the model.** Buy whichever side clears the ask (or 1 − bid) plus the per-order fee
+by an extra margin. The grid is margins 0, 2¢ and 5¢ × raw or adjusted spot × 3 horizons × order
+sizes 1 and 100: 36 variants.
+
+- **Selected on train: none.** All 36 train means are negative, from −0.3¢ to −2.1¢ per contract.
+  About half of the intervals (19 of 36) lie entirely below zero; none lies above.
+- **The ones closest to zero** are 100 contracts, raw spot, 5¢ margin, 10 minutes: −0.3¢ over
+  3,765 trades, interval [−2.6, +2.0]¢, MDE 2.3¢. And 100 contracts, adjusted, 0 margin, 2 minutes:
+  −0.7¢ [−1.4, +0.1]¢.
+- **What this rules out.** Following the model loses money on train, at about the cost of the
+  spread. The trading MDEs say no variant has an edge above roughly 0.7–2.9¢ per contract on train.
+- **Held-out** is printed in `step3` and is descriptive only. No variant was selected, so nothing is
+  claimed from it.
+
+### The Coinbase-vs-index basis
+
+Kalshi publishes the settlement index's own 60-second averages: `floor_strike` (at open) and
+`expiration_value` (at close). Each is compared with a Coinbase proxy, the mean of the open, high,
+low and close of the matching minute. Units are basis points of (index ÷ Coinbase − 1).
+
+| | n | median | p5 | p95 | mean |·| |
+|---|---|---|---|---|---|
+| Train, at close | 18,935 | +0.77 | −1.43 | +3.03 | 1.25 |
+| Test, at close | 9,205 | +0.45 | −1.16 | +2.12 | 0.87 |
+
+- **The index runs slightly above Coinbase,** by about half a basis point, and the gap typically
+  moves by 1–3 bp over a contract.
+- **There is a ceiling on any Coinbase-minute model.** Knowing Coinbase's final minute exactly still
+  calls only **96.7%** of contracts right (of 28,137 with both values). The other 3.3% are decided
+  inside the Coinbase-vs-index noise, plus the proxy's own error, since a 1-minute OHLC mean is not a
+  60-print average. Those are close calls a Coinbase-fed model cannot get right, and they are the
+  contracts whose prices sit near 50% late in the window.
+- **Data gaps and errors.** `expiration_value` is missing for 2,520 contracts: all of December 2025
+  and 1,212 of January 2026's. The basis exceeds 20 bp for 11 contracts. Nine of them come from 5 fast-moving minutes,
+  such as the 2026-02-05 selloff, where the proxy is poor (a contract's close is the next one's open,
+  so one bad minute shows twice). The other 2 are Kalshi data errors (next item).
+
+### Data error in Kalshi's own records (affects the live dashboard)
+
+**Two contracts' `floor_strike` is the true strike divided by 10⁴.**
+`KXBTC15M-26APR131115-15` has strike 7.2437; the true strike is 72,437.29, which is the previous
+contract's `expiration_value`, and the settled outcome matches it. `KXBTC15M-26APR131130-30` has
+7.1988 instead of 71,987.73.
+
+- **Effect on this study.** The model priced both at P = 1.0. That is 2 contracts in about 21,000
+  per horizon, adding at most 0.0005 to log-loss and 0.00005 to Brier. They are left in, as run, and
+  change no conclusion. Step 2 used market prices only and is unaffected.
+- **Effect on the live tool.** `kalshi_api.parse_market` reads the same field, so the same error on a
+  live contract would show **P(YES) = 100%**. *Recommended, not yet done:* reject a strike more than
+  a few percent from spot, or cross-check it against the previous contract's `expiration_value`.
+
+### Step 4: not triggered
+
+Step 4 (model improvements, then paper trading) was conditional on Step 2 or 3 showing something on
+held-out data. Neither did: no cell or variant passed the train rule, so nothing reached the
+held-out test.
+
+**Bottom line:** taking prices at the top of the book and paying Kalshi's fees, this data shows no
+edge, either in the market's own prices or in the dashboard's fair-value model. The market mid is at
+least as good a probability as the model at every horizon tested, and significantly better at most. Don't trade the model's P(YES) against
+Kalshi's quote.
+
+**What would be needed to look further:**
+
+- **A model that beats the mid on held-out Brier first,** before any trading. The obvious inputs
+  are a real per-second BRTI or multi-venue feed instead of Coinbase minutes, and, inside the final
+  minute, the running settlement average.
+- **Maker strategies,** which need order-book depth and queue data that candlesticks don't have.
+
+```bash
+python review/kalshi_market_study.py step3    # needs the fetch; first run builds study_data/model_obs.csv (~10 min)
+```
+
+### Limits (both steps)
 
 - **Fill size is unknown.** Every EV assumes the full order fills at the top-of-book price.
 - **The market changes.** Fees, tick sizes and market makers can change; held-out spreads are
@@ -314,4 +454,5 @@ of its interval.
 ```bash
 python review/kalshi_market_study.py fetch    # resumable; hours the first time (the /historical/ endpoint is rate-limited)
 python review/kalshi_market_study.py step2
+python review/kalshi_market_study.py sources  # /historical/ vs batch quotes; held-out 2-min slope by source
 ```
