@@ -134,6 +134,17 @@ Things to know:
   `PAPER_MIN_SAMPLE` settled markets the table says it can't tell skill from
   luck.
 
+### Scalping
+
+Paper trading holds every position to settlement; there is no early exit yet.
+Before building one, `python review/kalshi_scalp_backtest.py` tests whether
+buying a side and selling it back 1-3 minutes later can beat the round trip's
+costs (the spread and Kalshi's fee, paid twice) on the historical contracts.
+Run `python review/kalshi_market_study.py fetch` first to download the data it
+reads. It prints the cost floor, the best case an all-knowing trader could make,
+and four simple entry rules held to the same selection standard as the edge
+study.
+
 Fills are deliberately unflattering: YES is bought at the **ask**, NO at
 **1 - the bid**, and Kalshi's taker fee is charged (rounded up to the cent per
 order). Settlement uses Kalshi's own recorded result, so basis risk against
