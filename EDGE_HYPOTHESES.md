@@ -151,8 +151,10 @@ nobody reads three passes as three confirmations.
 
 ## Mandatory sanity checks (each hypothesis, same output)
 
-- **Permutation null:** outcomes shuffled across the hypothesis's trades 2,000 times (seed fixed), the
-  share of shuffles with mean P&L >= the observed one.
+- **Permutation null (side-flip; Amendment 1):** each trade's side is flipped with probability 1/2,
+  2,000 times (seed fixed); a flipped trade pays the other side's price (YES at the ask, NO at 1 - bid)
+  and its outcome inverts. Reported: the share of resamples with mean P&L >= the observed one. This
+  asks whether the rule's DIRECTION beats a coin flip at the same books.
 - **Stratification:** mean P&L by UTC day; by UTC 6-hour bin (00-06, 06-12, 12-18, 18-24); by
   tercile of `vol_ann` at entry, with tercile edges fixed from ALL confirmatory ticks (not from trades).
 - **Worse fills:** the same trades with every entry 1 c worse (ask + 1 c, bid - 1 c).
@@ -183,4 +185,10 @@ and may not set a parameter above.
 
 ## Amendments
 
-None. (Format: date, what changed, why, and the new family size and z.)
+Format: date, what changed, why, and the new family size and z.
+
+1. **2026-11-08, before any forward row existed** (found while writing the evaluator's tests): the
+   permutation null was specified as "outcomes shuffled across trades". For flat 1-lot sizing that
+   leaves the mean P&L unchanged (sum of wins minus sum of costs does not depend on which trade won),
+   so the test was degenerate. Replaced by the side-flip null above. A sanity check, not a hypothesis:
+   family stays 5, z = 2.576.
