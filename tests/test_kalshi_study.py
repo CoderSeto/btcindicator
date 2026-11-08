@@ -249,6 +249,35 @@ def test_bucket_table_reports_the_yes_rate_and_net_ev_per_bucket():
     assert t1.loc["0.1-0.2", "ev_yes"] == pytest.approx(0.5 - 0.16 - 0.01)
 
 
+def test_bucket_edges_are_fixed_not_derived_from_the_data():
+    # Two very different samples get the same bands: no quantiles are taken.
+    rng = np.random.default_rng(8)
+
+    def sample(lo, hi, n=400):
+        mid = rng.uniform(lo, hi, n)
+        return pd.DataFrame({"valid": True, "mid": mid, "bid": mid - 0.005, "ask": mid + 0.005,
+                             "outcome": (rng.random(n) < mid).astype(int),
+                             "day": rng.integers(0, 40, n).astype(str)})
+    train = ks.bucket_table(sample(0.0, 1.0), z=2.0, contracts=100, resamples=100)
+    test = ks.bucket_table(sample(0.42, 0.48), z=2.0, contracts=100, resamples=100)
+    assert list(train.bucket) == [f"{0.1 * i:.1f}-{0.1 * (i + 1):.1f}" for i in range(10)]
+    assert list(test.bucket) == ["0.4-0.5"]
+    assert ks.BUCKET_EDGES == (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+
+
+def test_bucket_table_reports_the_minimum_detectable_edge():
+    rng = np.random.default_rng(9)
+    n = 2000
+    mid = rng.uniform(0.3, 0.4, n)
+    obs = pd.DataFrame({"valid": True, "mid": mid, "bid": mid - 0.005, "ask": mid + 0.005,
+                        "outcome": (rng.random(n) < mid).astype(int), "day": np.arange(n).astype(str)})
+    r = ks.bucket_table(obs, z=3.0, contracts=100, resamples=1000).iloc[0]
+    assert r.ev_yes_mde == pytest.approx(r.ev_yes_hi - r.ev_yes)
+    assert r.ev_no_mde == pytest.approx(r.ev_no - r.ev_no_lo)
+    # iid days: SE ~ sd/sqrt(n) with sd ~ sqrt(p(1-p)) of the payoff
+    assert r.ev_yes_mde == pytest.approx(3.0 * math.sqrt(0.35 * 0.65 / n), rel=0.12)
+
+
 def test_calibration_fit_recovers_known_coefficients():
     rng = np.random.default_rng(3)
     p = rng.uniform(0.03, 0.97, 200_000)

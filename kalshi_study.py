@@ -85,7 +85,9 @@ SERIES = kalshi_api.SERIES_TICKER
 # --- pre-registered design (see module docstring) ---------------------------
 HORIZONS_MIN = (10, 5, 2)
 TEST_FRACTION = 0.30
-BUCKET_EDGES = tuple(round(0.1 * i, 1) for i in range(11))     # mid deciles
+# Fixed price bands of 10 cents -- constants, not quantiles of any data -- so
+# train and held-out are bucketed identically by construction.
+BUCKET_EDGES = tuple(round(0.1 * i, 1) for i in range(11))
 FAMILY_ALPHA = 0.05
 BOOTSTRAP_RESAMPLES = 2000
 BOOTSTRAP_SEED = 20261107
@@ -314,6 +316,9 @@ def bucket_table(obs: pd.DataFrame, z: float, contracts: int, edges=BUCKET_EDGES
     Per mid bucket (valid quotes only): mean mid, realized YES rate, and the
     mean net profit per contract of buying YES at the ask and of buying NO at
     1 - bid in orders of `contracts`, each with a +/- z block-bootstrap interval.
+    `*_mde` is z times the SE: the smallest edge that bucket could have
+    detected, so a null result says how large an edge it rules out.
+    `edges` are fixed, never derived from `obs`.
     """
     d = obs[obs["valid"]].copy()
     d["bucket"] = bucket_of(d["mid"], edges)
@@ -331,6 +336,7 @@ def bucket_table(obs: pd.DataFrame, z: float, contracts: int, edges=BUCKET_EDGES
             "yes_lo": interval(yes, z)[0], "yes_hi": interval(yes, z)[1],
             "ev_yes": ev_y["mean"], "ev_yes_lo": interval(ev_y, z)[0], "ev_yes_hi": interval(ev_y, z)[1],
             "ev_no": ev_n["mean"], "ev_no_lo": interval(ev_n, z)[0], "ev_no_hi": interval(ev_n, z)[1],
+            "ev_yes_mde": z * ev_y["se"], "ev_no_mde": z * ev_n["se"], "yes_rate_mde": z * yes["se"],
             "n_eff": ev_y["n_eff"],
         })
     return pd.DataFrame(rows)

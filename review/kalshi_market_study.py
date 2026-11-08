@@ -71,12 +71,12 @@ def family_z():
 
 def print_bucket_table(t):
     print(f"  {'bucket':9} {'n':>5} {'n_eff':>6} {'mid':>6} {'sprd':>5} {'YES rate [CI]':>20}   "
-          f"{'EV buy YES [CI]':>24}   {'EV buy NO [CI]':>24}")
+          f"{'EV buy YES [CI]':>24} {'MDE':>6}   {'EV buy NO [CI]':>24} {'MDE':>6}")
     for r in t.itertuples():
         print(f"  {r.bucket:9} {r.n:5d} {r.n_eff:6.0f} {r.mid:6.3f} {100 * r.spread:4.1f}c "
               f"{r.yes_rate:6.3f} [{r.yes_lo:5.3f},{r.yes_hi:5.3f}]   "
-              f"{_pct(r.ev_yes):>7} [{_pct(r.ev_yes_lo):>7},{_pct(r.ev_yes_hi):>7}]   "
-              f"{_pct(r.ev_no):>7} [{_pct(r.ev_no_lo):>7},{_pct(r.ev_no_hi):>7}]")
+              f"{_pct(r.ev_yes):>7} [{_pct(r.ev_yes_lo):>7},{_pct(r.ev_yes_hi):>7}] {100 * r.ev_yes_mde:5.1f}c   "
+              f"{_pct(r.ev_no):>7} [{_pct(r.ev_no_lo):>7},{_pct(r.ev_no_hi):>7}] {100 * r.ev_no_mde:5.1f}c")
 
 
 def print_exclusions(obs):
@@ -113,6 +113,8 @@ def cmd_step2():
           f"{ks.STEP3_TRADING_TESTS} (step 3 trading) + {ks.STEP3_SCORING_TESTS} (step 3 scoring) = "
           f"{ks.TOTAL_TESTS}; Bonferroni z = {z:.2f} on every interval below")
     print(f"Order sizes reported: {ks.ORDER_SIZES} contracts; the fee rounds up to the cent per order.")
+    print(f"Buckets: fixed 10-cent bands of the mid, {ks.BUCKET_EDGES}, identical on train and test. "
+          f"MDE = z x SE, the smallest edge per contract the bucket could detect.")
     print(FILL_NOTE + "\n")
 
     print_exclusions(obs)
@@ -257,7 +259,8 @@ def cmd_step3():
             lo, hi = ks.interval(s, z) if s["n"] > 1 else (np.nan, np.nan)
             results[(split, c, src, m, h)] = s
             print(f"  {c:3d}x {src:14} margin {m:.2f} h={h:2d}: {s['n']:5d} trades of {len(d):5d} "
-                  f"(YES {np.sum(side == 1):5d})  mean {_pct(s['mean'])} [{_pct(lo)}, {_pct(hi)}]")
+                  f"(YES {np.sum(side == 1):5d})  mean {_pct(s['mean'])} [{_pct(lo)}, {_pct(hi)}]  "
+                  f"MDE {100 * z * s['se']:.1f}c")
         print()
     selected = [v for v in variants
                 if results[("train",) + v]["n"] > 1
