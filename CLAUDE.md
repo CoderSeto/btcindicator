@@ -134,6 +134,20 @@ such, not slipped in quietly.
   `LOG_KALSHI_PREDICTIONS`) and checks them against real settled
   outcomes for calibration (bucketed hit-rate table + Brier score,
   compared against Kalshi's own market price as a baseline).
+- `kalshi_study.py` -- the KXBTC15M edge study (REVIEW_FINDINGS.md, "Is
+  there an edge?"): fetches and caches every settled market and its
+  1-minute candlesticks, plus Coinbase 1-minute history, into
+  `study_data/` (gitignored); per-order fees; train/test split;
+  day-block bootstrap; the model-vs-market comparison. Its docstring holds
+  the pre-registered design. Change it only by adding a labelled
+  amendment, never after looking at outcomes. Kalshi API facts it
+  depends on: the batch `GET /markets/candlesticks` caps a request at
+  10,000 candles (markets x minutes in the range) and returns nothing for
+  markets older than ~2026-08-31, which come one at a time from
+  `/historical/markets/{ticker}/candlesticks`. A candle is stamped with
+  the END of its minute. Some market records have no `floor_strike`, and
+  two have one scaled by 10^-4.
+  `review/kalshi_market_study.py` runs it.
 
 ## Design principles (the "why" behind non-obvious choices)
 
