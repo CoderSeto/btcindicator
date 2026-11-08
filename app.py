@@ -310,6 +310,7 @@ if "kalshi_minutes" not in st.session_state:
 kalshi_result = kalshi.fair_value(
     price_df, st.session_state["kalshi_strike"], st.session_state["kalshi_minutes"],
     cfg.KALSHI_VOL_LOOKBACK_MINUTES, candle_seconds=cfg.GRANULARITY, current_price=live_price,
+    max_strike_distance=cfg.KALSHI_MAX_STRIKE_DISTANCE,
 )
 
 # Only log a row that prices the tracked market's own strike. A hand-edited
@@ -469,7 +470,7 @@ with left:
                        "-- using the values above.")
 
         if not kalshi_result["available"]:
-            st.warning(f"Can't compute fair value: {kalshi_result['reason']}")
+            st.warning(_esc(f"Can't compute fair value: {kalshi_result['reason']}"))
         else:
             r1, r2, r3 = st.columns(3)
             with r1:

@@ -25,7 +25,7 @@ contracts. Step 3: the dashboard's fair-value model never beats Kalshi's mid. It
 every horizon on train and at 5 and 2 minutes on held-out data, and none of 36 ways of trading
 toward it is selected. Step 4 was therefore not
 triggered. Step 3 also found that Kalshi's own records hold two strikes scaled by 10⁻⁴, which the
-live dashboard would price as P(YES) = 100% (a guard is recommended, not yet added). Details in the
+live dashboard would price as P(YES) = 100%. The dashboard now refuses such a strike and says why. Details in the
 section "Is there an edge?" at the end.
 
 **Second follow-up:** five more items are done: T1 (feed-parser tests), known item 2
@@ -421,8 +421,11 @@ contract's `expiration_value`, and the settled outcome matches it. `KXBTC15M-26A
   settled NO it would be about twice that. They are left in, as run, and change no conclusion.
   Step 2 used market prices only and is unaffected.
 - **Effect on the live tool.** `kalshi_api.parse_market` reads the same field, so the same error on a
-  live contract would show **P(YES) = 100%**. *Recommended, not yet done:* reject a strike more than
-  a few percent from spot, or cross-check it against the previous contract's `expiration_value`.
+  live contract would show **P(YES) = 100%**. *Now:* `kalshi.fair_value` refuses a strike more than
+  `KALSHI_MAX_STRIKE_DISTANCE` (5%) from spot. The page then shows why, instead of a P(YES), and
+  nothing is logged. Tests use both real cases: `test_kalshi.py` (strike guard) and
+  `test_app.py::test_a_bad_strike_from_kalshi_shows_the_reason_instead_of_a_certain_p_yes`, which
+  fails with `'100.0%'` when the guard is off.
 
 ### Step 4: not triggered
 

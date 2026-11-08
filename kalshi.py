@@ -200,8 +200,34 @@ def settlement_probability(current_price: float, strike: float, minutes_remainin
     return _norm_cdf(d)
 
 
+MAX_STRIKE_DISTANCE = 0.05     # config.KALSHI_MAX_STRIKE_DISTANCE; see strike_check
+
+
+def strike_check(strike: float, current_price: float, max_distance: float = MAX_STRIKE_DISTANCE):
+    """
+    None if the strike is plausible, else the reason it isn't. A strike more
+    than `max_distance` (a fraction, 0.05 = 5%) from spot is refused, not
+    priced: BTC doesn't move that far within one 15-minute window, and
+    Kalshi's own records have held strikes divided by 10,000 (7.2437 for
+    72,437.29). The model prices those at P(YES) = 100%, which looks like a
+    sure thing rather than an error. The reason's first words carry no
+    dollar sign, so it can be cut short for a metric label.
+    """
+    if max_distance is None or not (strike > 0 and current_price > 0):
+        return None
+    distance = abs(strike / current_price - 1.0)
+    if distance <= max_distance + 1e-9:          # exactly at the limit passes despite float residue
+        return None
+    return (f"Strike {distance * 100:.1f}% from spot -- likely bad. ${strike:,.2f} vs spot "
+            f"${current_price:,.2f} is far more than BTC moves in 15 minutes, so the strike is "
+            f"probably wrong (Kalshi's own records have held strikes divided by 10,000). Not "
+            f"priced; check the strike. The limit is {max_distance * 100:.0f}% "
+            f"(KALSHI_MAX_STRIKE_DISTANCE).")
+
+
 def fair_value(df: pd.DataFrame, strike: float, minutes_remaining: float, lookback_minutes: int,
-               candle_seconds: int = 60, current_price: float = None) -> dict:
+               candle_seconds: int = 60, current_price: float = None,
+               max_strike_distance: float = MAX_STRIKE_DISTANCE) -> dict:
     """
     Convenience wrapper: takes the current price (`current_price`, or the
     latest candle close if it isn't given), computes realized volatility
@@ -216,7 +242,9 @@ def fair_value(df: pd.DataFrame, strike: float, minutes_remaining: float, lookba
     notices.
 
     Returns {"available": False, "reason": ...} if there isn't enough
-    data to compute a trustworthy estimate.
+    data to compute a trustworthy estimate, or if the strike fails
+    strike_check (then "strike_rejected" is True). Pass
+    max_strike_distance=None to skip that check.
     """
     if df.empty:
         return {"available": False, "reason": "No candle data available."}
@@ -226,6 +254,9 @@ def fair_value(df: pd.DataFrame, strike: float, minutes_remaining: float, lookba
     current_price = float(df["close"].iloc[-1]) if current_price is None else float(current_price)
     if not current_price > 0:
         return {"available": False, "reason": "Current price must be a positive number."}
+    bad_strike = strike_check(strike, current_price, max_strike_distance)
+    if bad_strike:
+        return {"available": False, "reason": bad_strike, "strike_rejected": True}
     vol_result = realized_volatility(df, lookback_minutes, candle_seconds)
     if vol_result["annual_vol"] is None:
         return {"available": False, "reason": vol_result["reason"]}
@@ -300,6 +331,7 @@ if __name__ == "__main__":
 
     spot = data_fetch.latest_price(cfg.PRODUCT_ID, df)
     result = fair_value(df, args.strike, minutes_remaining, lookback, candle_seconds=cfg.GRANULARITY,
+                        max_strike_distance=cfg.KALSHI_MAX_STRIKE_DISTANCE,
                         current_price=spot["price"])
     if not result["available"]:
         print(f"[error] {result['reason']}")

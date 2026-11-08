@@ -715,6 +715,23 @@ def test_kalshi_auto_track_only_follows_the_btc_contract_on_btc_usd(env):
     assert "only tracks KXBTC15M on BTC-USD" in all_text(at)
 
 
+def test_a_bad_strike_from_kalshi_shows_the_reason_instead_of_a_certain_p_yes(env):
+    # Kalshi's own record for KXBTC15M-26APR131115-15 listed floor_strike 7.243729 (the true
+    # strike divided by 10,000). Unguarded, the page showed P(YES) = 100.0% and logged it.
+    cfg.LOG_KALSHI_PREDICTIONS = True
+    env.kalshi = kalshi_live(floor_strike=7.243729)
+    at = run()
+    no_exception(at)
+    assert at.number_input(key="kalshi_strike").value == pytest.approx(7.243729)
+    assert metric(at, "Kalshi P(YES)").value == "--"
+    assert metric(at, "Kalshi P(YES)").delta.startswith("Strike 100.0% from spot")
+    assert not [m for m in at.metric if m.label == "P(YES)"]
+    warning = " ".join(w.value for w in at.warning)
+    assert "likely bad" in warning and "divided by 10,000" in warning
+    assert not re.search(r"(?<!\\)\$", warning)                        # money escaped
+    assert not pathlib.Path(cfg.KALSHI_PREDICTIONS_LOG_PATH).exists()      # nothing logged
+
+
 def test_notes_describe_the_settlement_average_model_and_its_final_minute_limit(env):
     # P(YES) now prices the 60-second average (kalshi.settlement_probability). What remains a
     # limitation is the final minute, where the already-elapsed prints are taken at spot.
