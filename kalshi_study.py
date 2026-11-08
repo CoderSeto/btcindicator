@@ -48,6 +48,14 @@ held-out data; add a variant instead and count it.
     z over the TOTAL number of tests in Steps 2 and 3 (TOTAL_TESTS), not a
     per-step count. Fills at the quoted top of book are assumed; candlesticks
     carry no depth, so the size really available there may be smaller.
+  - Second amendment, after an independent review of c2568ea and again
+    before any outcome had been looked at: a real book also needs
+    ask - bid <= MAX_SPREAD (20c). Without it a one-sided placeholder such
+    as bid 0.001 / ask 0.55 passed, and its "mid" of 0.28 is meaningless:
+    it would misplace the contract's bucket, distort the calibration fit,
+    and in Step 3 give the model a meaningless mid to beat. Executed prices
+    were always real, so EVs were not biased by it. exclusions() reports how
+    many rows the cap removes, per month.
 
 Fees, verified 2026-11-07 against Kalshi's own fee schedule
 (kalshi.com/docs/kalshi-fee-schedule.pdf, "Last updated and effective: July
@@ -94,6 +102,7 @@ BOOTSTRAP_SEED = 20261107
 TAKER_FEE_RATE = 0.07
 FEE_MULTIPLIER = 1.0
 ORDER_SIZES = (1, 100)              # contracts per order; the fee rounds up per order
+MAX_SPREAD = 0.20                   # widest ask - bid still counted as a real book (second amendment)
 
 # Step 3
 VOL_LOOKBACK_MIN = 120              # same window as the live calculator
@@ -151,12 +160,25 @@ def ev_buy_no(outcome, bid, contracts: int):
     return (1.0 - np.asarray(outcome, dtype=float)) - cost - fee_per_contract(cost, contracts)
 
 
-def valid_book(bid, ask):
-    """A real two-sided quote: 0 < bid < ask < 1 (elementwise)."""
+def two_sided(bid, ask):
+    """Both sides quoted: 0 < bid < ask < 1 (elementwise). Not yet a real book; see valid_book."""
     bid = np.asarray(bid, dtype=float)
     ask = np.asarray(ask, dtype=float)
     with np.errstate(invalid="ignore"):
         return (bid > 0) & (ask < 1) & (bid < ask)
+
+
+def valid_book(bid, ask, max_spread: float = MAX_SPREAD):
+    """
+    A real book: two-sided AND ask - bid <= max_spread. A bid of 0.001 under
+    an ask of 0.55 is a placeholder, and the midpoint of the two says nothing
+    about the probability. The 1e-9 keeps an exact 20c spread from failing
+    on float residue.
+    """
+    bid = np.asarray(bid, dtype=float)
+    ask = np.asarray(ask, dtype=float)
+    with np.errstate(invalid="ignore"):
+        return two_sided(bid, ask) & (ask - bid <= max_spread + 1e-9)
 
 
 # --- parsing raw Kalshi payloads --------------------------------------------
@@ -344,21 +366,25 @@ def bucket_table(obs: pd.DataFrame, z: float, contracts: int, edges=BUCKET_EDGES
 
 def exclusions(obs: pd.DataFrame) -> pd.DataFrame:
     """
-    Per month and horizon: contracts, how many were excluded for having no
-    candle at that exact minute or for failing the real-book filter, and the
-    exclusion rate among contracts that settled YES vs NO. If exclusion is
-    related to the outcome, the buckets describe a biased subset.
+    Per month and horizon: contracts, and how many were excluded for each
+    reason -- no candle at that exact minute (no_quote), a side missing
+    (one_sided), or two-sided but wider than the spread cap (wide_spread) --
+    plus the exclusion rate among contracts that settled YES vs NO. If
+    exclusion is related to the outcome, the buckets describe a biased subset.
     """
     d = obs.copy()
     d["month"] = d["day"].str[:7]
     d["no_quote"] = d["bid"].isna() | d["ask"].isna()
-    d["bad_book"] = ~d["no_quote"] & ~d["valid"]
+    both = two_sided(d["bid"].to_numpy(), d["ask"].to_numpy())
+    d["one_sided"] = ~d["no_quote"] & ~both
+    d["wide_spread"] = both & ~d["valid"]
     d["excluded"] = ~d["valid"]
     rows = []
     for (month, h), g in d.groupby(["month", "horizon"]):
         yes, no = g[g.outcome == 1], g[g.outcome == 0]
         rows.append({"month": month, "horizon": h, "contracts": len(g),
-                     "no_quote": int(g.no_quote.sum()), "bad_book": int(g.bad_book.sum()),
+                     "no_quote": int(g.no_quote.sum()), "one_sided": int(g.one_sided.sum()),
+                     "wide_spread": int(g.wide_spread.sum()),
                      "excluded_rate": float(g.excluded.mean()),
                      "excl_rate_yes": float(yes.excluded.mean()) if len(yes) else float("nan"),
                      "excl_rate_no": float(no.excluded.mean()) if len(no) else float("nan")})

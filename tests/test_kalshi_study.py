@@ -97,7 +97,11 @@ def test_holding_both_sides_always_loses_the_spread_and_two_fees():
 
 @pytest.mark.parametrize("bid,ask,ok", [
     (0.46, 0.47, True), (0.0, 0.999, False), (0.0, 1.0, False), (0.999, 1.0, False),
-    (0.5, 0.5, False), (0.001, 0.999, True), (float("nan"), 0.5, False),
+    (0.5, 0.5, False), (float("nan"), 0.5, False),
+    # One-sided placeholders: two-sided on paper, "mids" of 0.28 / 0.72 / 0.50.
+    (0.001, 0.55, False), (0.45, 0.999, False), (0.001, 0.999, False),
+    # The cap itself: exactly 20c passes, a hair more does not.
+    (0.40, 0.60, True), (0.40, 0.6001, False), (0.35, 0.79, False),
 ])
 def test_valid_book_needs_a_real_bid_and_offer(bid, ask, ok):
     assert bool(ks.valid_book(bid, ask)) is ok
@@ -312,19 +316,19 @@ def test_calibration_fit_is_at_the_likelihood_maximum():
         assert ll(a + da, b + db) < best
 
 
-def test_exclusions_count_missing_and_bad_books_per_month_and_by_outcome():
+def test_exclusions_count_each_reason_per_month_and_by_outcome():
     obs = pd.DataFrame({
-        "day": ["2026-01-05"] * 4 + ["2026-02-03"] * 2,
-        "horizon": [5] * 6,
-        "bid": [0.4, np.nan, 0.0, 0.5, 0.3, 0.3],
-        "ask": [0.41, np.nan, 1.0, 0.51, 0.31, 0.31],
-        "outcome": [1, 1, 0, 0, 1, 0],
+        "day": ["2026-01-05"] * 5 + ["2026-02-03"] * 2,
+        "horizon": [5] * 7,
+        "bid": [0.4, np.nan, 0.0, 0.5, 0.001, 0.3, 0.3],
+        "ask": [0.41, np.nan, 1.0, 0.51, 0.55, 0.31, 0.31],
+        "outcome": [1, 1, 0, 0, 1, 1, 0],
     })
     obs["valid"] = ks.valid_book(obs.bid, obs.ask)
     t = ks.exclusions(obs).set_index("month")
     jan = t.loc["2026-01"]
-    assert (jan.contracts, jan.no_quote, jan.bad_book) == (4, 1, 1)
-    assert jan.excl_rate_yes == pytest.approx(0.5) and jan.excl_rate_no == pytest.approx(0.5)
+    assert (jan.contracts, jan.no_quote, jan.one_sided, jan.wide_spread) == (5, 1, 1, 1)
+    assert jan.excl_rate_yes == pytest.approx(2 / 3) and jan.excl_rate_no == pytest.approx(0.5)
     assert t.loc["2026-02", "excluded_rate"] == 0
 
 

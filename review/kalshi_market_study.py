@@ -86,7 +86,8 @@ def print_exclusions(obs):
     wide = t.pivot(index="month", columns="horizon")
     cols = []
     for h in ks.HORIZONS_MIN:
-        cols += [("contracts", h), ("no_quote", h), ("bad_book", h), ("excl_rate_yes", h), ("excl_rate_no", h)]
+        cols += [("contracts", h), ("no_quote", h), ("one_sided", h), ("wide_spread", h),
+                 ("excl_rate_yes", h), ("excl_rate_no", h)]
     out = wide[cols]
     out.columns = [f"{c}@{h}" for c, h in cols]
     print(out.to_string(float_format=lambda x: f"{x:.3f}"))
@@ -97,8 +98,11 @@ def print_exclusions(obs):
         for h in ks.HORIZONS_MIN:
             d = obs[obs.horizon == h] if split == "all" else obs[(obs.horizon == h) & (obs.split == split)]
             g = ks.exclusion_outcome_gap(d)
+            both = d[ks.two_sided(d["bid"].to_numpy(), d["ask"].to_numpy())]
+            w = ks.exclusion_outcome_gap(both)                 # the spread cap alone, among two-sided rows
             print(f"  {split:5} h={h:2d}: excluded {g['rate_yes']:.4f} of YES, {g['rate_no']:.4f} of NO, "
-                  f"gap {g['gap']:+.4f} +/- {g['se']:.4f} (z {g['gap'] / g['se']:+.2f})")
+                  f"gap {g['gap']:+.4f} +/- {g['se']:.4f} (z {g['gap'] / g['se']:+.2f});  "
+                  f"spread cap alone: {w['rate_yes']:.4f} vs {w['rate_no']:.4f} (z {w['gap'] / w['se']:+.2f})")
     print()
 
 
@@ -115,6 +119,9 @@ def cmd_step2():
     print(f"Order sizes reported: {ks.ORDER_SIZES} contracts; the fee rounds up to the cent per order.")
     print(f"Buckets: fixed 10-cent bands of the mid, {ks.BUCKET_EDGES}, identical on train and test. "
           f"MDE = z x SE, the smallest edge per contract the bucket could detect.")
+    print(f"Real book: 0 < bid < ask < 1 and ask - bid <= {ks.MAX_SPREAD:.2f}.")
+    print("All 120 cells print for train AND test. Only cells chosen by the train selection rule may be "
+          "claimed; the test tables are descriptive.")
     print(FILL_NOTE + "\n")
 
     print_exclusions(obs)
