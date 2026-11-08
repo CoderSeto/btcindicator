@@ -12,11 +12,13 @@ _strike_path_liquidity) are lifted out of its source with `ast` and unit
 tested directly.
 """
 import ast
+import csv
+import os
 import json
 import pathlib
 import re
 import time as real_time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import numpy as np
@@ -34,6 +36,7 @@ import kalshi
 import kalshi_api
 import orderbook
 import orderbook_feeds as obf
+import paper_trading
 from test_dashboard_data import REST_BOOK, candles
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -111,6 +114,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "SIGNAL_LOG_PATH", str(tmp_path / "signals.csv"))
     monkeypatch.setattr(cfg, "KALSHI_PREDICTIONS_LOG_PATH", str(tmp_path / "kpred.csv"))
     monkeypatch.setattr(cfg, "BACKTEST_RESULTS_PATH", str(tmp_path / "bt.json"))
+    monkeypatch.setattr(cfg, "PAPER_TRADE_LOG_PATH", str(tmp_path / "paper.csv"))
     e.tmp = tmp_path
 
     def get_candles(product_id, *a, **k):
@@ -136,6 +140,8 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(kalshi_api, "_now", lambda: NOW)
     monkeypatch.setattr(kalshi_api, "_poll_cache", {"at": None, "result": None})
     monkeypatch.setattr(cfg, "KALSHI_POLL_SECONDS", 0)
+    monkeypatch.setattr(paper_trading, "utcnow", lambda: NOW)
+    monkeypatch.setattr(paper_trading, "_last_settle_attempt", {})
 
     class Handle:
         def __init__(self, which):
@@ -272,7 +278,7 @@ def test_renders_without_feeds_or_kalshi(env):
     assert re.fullmatch(r"\d+/\d+ aligned", comp.delta)
     assert metric(at, "Order book (1 venue)").delta in ("buy pressure", "sell pressure", "balanced")   # REST fallback
     assert "Auto-track couldn't reach Kalshi" in all_text(at)
-    assert len(at.tabs) == 5
+    assert len(at.tabs) == 6
     assert "Level-2 depth feeds are disabled" in all_text(at)
     assert "Multi-exchange feeds are disabled" in all_text(at)
 
@@ -944,3 +950,83 @@ def test_a_frozen_depth_venue_shows_as_frozen_not_connected(env):
     assert row and "frozen, not counted" in row[0] and "\U0001F534" in row[0]
     coinbase = [m.value for m in at.markdown if "<b>coinbase</b>" in m.value]
     assert coinbase and "\U0001F7E2" in coinbase[0]
+
+
+# ---------- paper trading ----------
+
+def paper_rows():
+    with open(cfg.PAPER_TRADE_LOG_PATH, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def test_paper_tab_prices_each_side_off_the_live_quote(env):
+    at = run()
+    no_exception(at)
+    assert not at.button(key="paper_buy_yes").disabled
+    assert at.button(key="paper_buy_yes").label == "Buy YES @ 44.0\u00a2"        # the ask
+    assert at.button(key="paper_buy_no").label == "Buy NO @ 57.0\u00a2"          # 1 - the 0.43 bid
+    assert "No paper trades yet" in all_text(at)
+    assert paper_trading.LIMITS_NOTE.replace("$", r"\$") in all_text(at)
+
+
+def test_buying_a_side_logs_the_fill_with_fee_and_shows_it(env):
+    at = run()
+    at.number_input(key="paper_contracts").set_value(10).run()
+    at.button(key="paper_buy_yes").click().run()
+    no_exception(at)
+    (row,) = paper_rows()
+    assert (row["event"], row["side"], row["contracts"], row["price"], row["fee"]) == ("open", "yes", "10", "0.44", "0.18")
+    assert row["ticker"] == OPEN_MARKET["ticker"] and row["strike"] == str(OPEN_MARKET["floor_strike"])
+    assert row["composite"] in ("bullish", "bearish", "neutral")
+    assert row["model_p_yes"] != "" and row["spot"] != ""                       # context recorded for later study
+    text = all_text(at)
+    assert "Bought 10 YES" in text and "4.58" in text                           # 10 * 0.44 + 0.18
+    assert not re.search(r"(?<!\\)\$", text.split("Bought 10 YES")[1].split("\n")[0]), "unescaped $ would render as LaTeX"
+    assert [df.value for df in at.dataframe if "state" in df.value.columns][0]["state"].tolist() == ["open"]
+    # a later refresh must not place it again
+    at.run()
+    assert len(paper_rows()) == 1
+
+
+def test_buying_no_pays_one_minus_the_bid(env):
+    at = run()
+    at.button(key="paper_buy_no").click().run()
+    (row,) = paper_rows()
+    assert (row["side"], row["price"], row["fee"]) == ("no", "0.57", "0.02")
+
+
+def test_an_order_is_priced_on_a_fresh_quote_not_the_cached_one(env):
+    at = run()
+    env.kalshi = kalshi_live(yes_bid_dollars="0.50", yes_ask_dollars="0.52")        # the market moved since the last poll
+    at.button(key="paper_buy_yes").click().run()
+    assert paper_rows()[0]["price"] == "0.52"
+
+
+def test_a_market_that_closed_since_the_page_loaded_refuses_the_order(env):
+    at = run()
+    env.kalshi = kalshi_live(close_time=NOW.isoformat().replace("+00:00", "Z"))
+    at.button(key="paper_buy_yes").click().run()
+    assert "already closed" in all_text(at) and not os.path.exists(cfg.PAPER_TRADE_LOG_PATH)
+
+
+def test_paper_trading_needs_the_live_quote(env):
+    env.kalshi = {"available": False, "reason": "Couldn't reach Kalshi's API: offline"}
+    at = run()
+    no_exception(at)
+    assert at.button(key="paper_buy_yes").disabled and at.button(key="paper_buy_no").disabled
+    assert "needs the live KXBTC15M quote" in all_text(at)
+
+
+def test_a_resolved_position_is_settled_and_counted_on_the_next_refresh(env, monkeypatch):
+    earlier = datetime(2026, 11, 7, 17, 40, tzinfo=timezone.utc)                 # before the old contract closed at 17:45
+    old = kalshi_api.parse_market({**OPEN_MARKET, "ticker": "KXBTC15M-OLD", "close_time": "2026-11-07T17:45:00Z"}, now=earlier)
+    assert paper_trading.place_order(cfg, old, "yes", 1, now=earlier)["ok"]
+    monkeypatch.setattr(kalshi_api, "get_market", lambda t: {"ticker": t, "result": "yes"})
+    at = run()
+    no_exception(at)
+    assert metric(at, "Won / lost").value == "1 / 0"
+    assert metric(at, "Net P&L").value == "$+0.54"                              # 1.00 - 0.44 - 0.02
+    assert metric(at, "Fees paid").value == "$0.02"
+    assert "Too few settled markets" in all_text(at)                            # n = 1 is flagged, not trusted
+    at.run()
+    assert sum(r["event"] == "settle" for r in paper_rows()) == 1

@@ -268,3 +268,14 @@ KALSHI_CALIBRATION_MIN_SAMPLE = 5
 # 0 or 1 -- so it measured the model where it matters least.
 KALSHI_CALIBRATION_HORIZON_MINUTES = 5.0
 KALSHI_CALIBRATION_HORIZON_TOLERANCE_MINUTES = 1.0
+
+# --- Paper trading on KXBTC15M (see paper_trading.py) ---
+# Where simulated orders and their settlements are kept: an append-only CSV of
+# events, written only through csv_utils.append_row.
+PAPER_TRADE_LOG_PATH = "paper_trades.csv"
+# Below this many settled MARKETS the account summary is flagged as too small
+# to tell skill from luck (the same idea as BACKTEST_MIN_SAMPLE).
+PAPER_MIN_SAMPLE = 30
+# The win rate has to beat the break-even rate by this many standard errors
+# before the summary calls it anything but noise.
+PAPER_NOISE_Z = 2.0

@@ -20,6 +20,7 @@ signal_log.csv
 backtest_results.json
 kalshi_predictions.csv
 kalshi_outcomes_cache.json
+paper_trades.csv
 # Raw Kalshi/Coinbase history cached by kalshi_study.py / review/kalshi_market_study.py
 study_data/
 # Older-layout logs rotated aside when a column is added (see CLAUDE.md gotcha #1)

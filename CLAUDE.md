@@ -134,6 +134,20 @@ such, not slipped in quietly.
   `LOG_KALSHI_PREDICTIONS`) and checks them against real settled
   outcomes for calibration (bucketed hit-rate table + Brier score,
   compared against Kalshi's own market price as a baseline).
+- `paper_trading.py` -- paper trading on KXBTC15M (dashboard tab "Paper
+  trading", or `python paper_trading.py`). An order buys YES at the ask or NO
+  at 1 - bid and pays `kalshi_study.order_fee` (reused, so the fee model has
+  one home), and settles on Kalshi's own recorded `result` via
+  `kalshi_tracking.resolve_outcomes`. Never fill at the mid or skip the fee:
+  the edge study's whole finding is that costs erase the apparent edge, so a
+  frictionless paper account would be a flattering lie. The ledger is an
+  append-only EVENT log (`open` / `settle` rows joined on `trade_id` by
+  `load_trades()`), written only through `csv_utils.append_row`; settling uses
+  its `skip_if` so two tabs can't settle one trade twice. Orders price on a
+  fresh `current_btc15m_market()`, not the 10s poll cache. `summarize()`
+  reports the win rate against the break-even rate with its standard error
+  (counting each market once) and flags small samples -- keep it that way.
+  Not modelled, and the tab says so: size at the touch, latency.
 - `kalshi_study.py` -- the KXBTC15M edge study (REVIEW_FINDINGS.md, "Is
   there an edge?"): fetches and caches every settled market and its
   1-minute candlesticks, plus Coinbase 1-minute history, into
@@ -434,7 +448,7 @@ and is what any new tests should match:
   wall large enough to hide itself under a mean.
 
 Also covered now: `kalshi.py`, `weighting.py`, `backtest.py`, `backtest_agg_delta.py`,
-`kalshi_tracking.py`, `kalshi_api.py`, `indicators.py`, `divergence.py`,
+`kalshi_tracking.py`, `paper_trading.py`, `kalshi_api.py`, `indicators.py`, `divergence.py`,
 `outlook.py`, `dashboard_data.py`, `charts.py` and `app.py`. Writing them turned up three real bugs, all fixed:
 `compute_calibration` borrowed an older row's Kalshi quote (`groupby().first()`
 is per-column) and crashed when only some contracts had quotes, and
@@ -500,12 +514,13 @@ python kalshi_api.py              # sanity-check Kalshi API connectivity
 python kalshi.py --strike X --minutes Y   # one-off Kalshi fair-value check
 python analyze_correlation.py     # needs LOG_ALL_SIGNALS=True first
 python kalshi_tracking.py         # needs LOG_KALSHI_PREDICTIONS=True first
+python paper_trading.py          # settle due paper trades and print the account
 ```
 
 ## Runtime-generated files (gitignored -- not source, don't hand-edit)
 
 `alerts_log.csv`, `signal_log.csv`, `backtest_results.json`,
-`kalshi_predictions.csv`, `kalshi_outcomes_cache.json` -- all created
+`kalshi_predictions.csv`, `kalshi_outcomes_cache.json`, `paper_trades.csv` -- all created
 automatically by the scripts above on first use. Plus
 `*.csv.<timestamp>.bak`, written when a log's column layout changes
 between releases (gotcha #1) -- old data, still readable, safe to delete
