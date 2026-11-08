@@ -49,6 +49,7 @@ import uuid
 from datetime import datetime, timezone
 
 import kalshi_api
+import kalshi_decision
 import kalshi_study
 import kalshi_tracking
 from csv_utils import append_row
@@ -60,7 +61,7 @@ LEDGER_HEADER = [
 ]
 
 SIDES = ("yes", "no")
-STRATEGIES = ("composite", "model")
+STRATEGIES = ("composite", "model", "decision")
 MANUAL = "manual"
 
 # A contract that has closed but isn't resolved yet (Kalshi settles a few
@@ -293,7 +294,8 @@ def settle_due(cfg, now=None, retry_seconds: float = SETTLE_RETRY_SECONDS) -> in
 # --- automatic mode ----------------------------------------------------------
 
 def decide(strategy: str, composite=None, strength=0, alert_threshold=3, model_p_yes=None,
-           yes_bid=None, yes_ask=None, contracts: int = 1, margin: float = 0.0):
+           yes_bid=None, yes_ask=None, contracts: int = 1, margin: float = 0.0,
+           minutes_left=None, decision_rule=None):
     """
     The automatic rule: (side, why) with side "yes", "no" or None.
 
@@ -321,6 +323,12 @@ def decide(strategy: str, composite=None, strength=0, alert_threshold=3, model_p
         if side == 0:
             return None, f"model {model_p_yes * 100:.0f}% has no edge over the price after the fee"
         return ("yes" if side == 1 else "no"), f"model {model_p_yes * 100:.0f}% beats the price by more than the fee"
+    if strategy == "decision":
+        # kalshi_decision's walk-forward-selected rule; no rule selected = never trades.
+        if minutes_left is None:
+            return None, "no minutes-left for the decision rule"
+        d = kalshi_decision.decide_action(decision_rule, model_p_yes, yes_bid, yes_ask, minutes_left, contracts)
+        return d["side"], "; ".join(d["reasons"])
     raise ValueError(f"strategy must be one of {STRATEGIES}, not {strategy!r}")
 
 
@@ -356,15 +364,18 @@ def auto_step(cfg, live_market: dict, fetch_market, strategy: str, contracts: in
         return {"action": "done", "reason": "already traded this market"}
 
     margin = getattr(cfg, "PAPER_AUTO_MODEL_MARGIN", 0.0)
+    rule = (kalshi_decision.load_active(cfg.DECISION_BACKTEST_PATH)[0] if strategy == "decision" else None)
     side, why = decide(strategy, composite, strength, alert_threshold, model_p_yes,
-                       live_market.get("yes_bid"), live_market.get("yes_ask"), contracts, margin)
+                       live_market.get("yes_bid"), live_market.get("yes_ask"), contracts, margin,
+                       minutes_left=minutes, decision_rule=rule)
     if side is None:
         return {"action": "no_signal", "reason": why}
 
     fresh = fetch_market()
     if fresh.get("available") and fresh["ticker"] == ticker:
         side, why = decide(strategy, composite, strength, alert_threshold, model_p_yes,
-                           fresh.get("yes_bid"), fresh.get("yes_ask"), contracts, margin)
+                           fresh.get("yes_bid"), fresh.get("yes_ask"), contracts, margin,
+                           minutes_left=minutes, decision_rule=rule)
         if side is None:
             return {"action": "no_signal", "reason": f"on the fresh quote: {why}"}
     placed = place_order(cfg, fresh, side, contracts, spot=spot, model_p_yes=model_p_yes,

@@ -298,6 +298,11 @@ PAPER_AUTO_LAST_MINUTES = 2.0
 PAPER_AUTO_CONTRACTS = 1
 PAPER_AUTO_MODEL_MARGIN = 0.02
 
+# Written by review/kalshi_decision_backtest.py: the rule kalshi_decision chose by
+# walk-forward on the cached study data, and its out-of-sample record. Missing or
+# empty means the dashboard's decision line says NO TRADE.
+DECISION_BACKTEST_PATH = "decision_backtest.json"
+
 # ---------------------------------------------------------------------------
 # Forward edge recorder (edge_recorder.py; EDGE_HYPOTHESES.md). Records the
 # live KXBTC15M quote next to spot, depth and flow once a second so the

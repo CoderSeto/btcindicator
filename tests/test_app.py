@@ -115,6 +115,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "KALSHI_PREDICTIONS_LOG_PATH", str(tmp_path / "kpred.csv"))
     monkeypatch.setattr(cfg, "BACKTEST_RESULTS_PATH", str(tmp_path / "bt.json"))
     monkeypatch.setattr(cfg, "PAPER_TRADE_LOG_PATH", str(tmp_path / "paper.csv"))
+    monkeypatch.setattr(cfg, "DECISION_BACKTEST_PATH", str(tmp_path / "decision.json"))
     e.tmp = tmp_path
 
     def get_candles(product_id, *a, **k):
@@ -331,6 +332,38 @@ def test_kalshi_auto_track_fills_strike_and_countdown_and_shows_model_vs_market(
     assert metric(at, "Kalshi P(YES)").delta.endswith("pts vs market")
     assert re.fullmatch(r"\d+¢", metric(at, "Market YES").value)
     assert OPEN_MARKET["ticker"] in all_text(at)
+
+
+def test_decision_line_defaults_to_no_trade_without_a_backtest(env):
+    at = run()
+    no_exception(at)
+    text = all_text(at)
+    assert "NO TRADE" in text and "run review/kalshi_decision_backtest.py" in text
+    assert "NO TRADE is the default" in text
+
+
+def _write_rule(env, **rule):
+    (env.tmp / "decision.json").write_text(json.dumps({
+        "rule": {"margin": 0.0, "shrink": 1.0, "horizons": [7.5], "band": None, **rule},
+        "oos": {"n": 120, "mean": -0.004, "ci95": [-0.02, 0.012], "folds_traded": 3, "folds": 6,
+                "max_drawdown": 4.2}}), encoding="utf-8")
+
+
+def test_decision_line_shows_the_selected_rule_its_cost_and_its_out_of_sample_record(env):
+    _write_rule(env, margin=0.0, shrink=1.0)
+    at = run()
+    no_exception(at)
+    text = all_text(at)
+    assert ("BUY YES" in text) or ("BUY NO" in text) or ("sees no net edge" in text)
+    assert "Walk-forward out of sample: 120 trades" in text and "-0.40c each" in text
+    assert "NO TRADE is the default" in text
+
+
+def test_decision_line_says_when_the_clock_is_outside_the_backtested_windows(env):
+    _write_rule(env, horizons=[2])
+    at = run()
+    no_exception(at)
+    assert "outside the windows the rule was backtested at" in all_text(at)
 
 
 def test_kalshi_p_yes_is_not_blended_with_the_bot_signals(env):

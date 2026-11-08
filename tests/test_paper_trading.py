@@ -525,3 +525,17 @@ def test_report_lists_each_source(tmp_path, monkeypatch):
     pt.place_order(cfg, market(ticker="KXBTC15M-T2"), "yes", 1, now=NOW, source="auto:model")
     text = pt.report(cfg)
     assert "manual: 1 open" in text and "auto:model: 1 open" in text
+
+
+def test_decision_strategy_follows_the_selected_rule_and_never_trades_without_one():
+    import kalshi_decision as kd
+    rule = kd.Rule(0.0, 1.0, (5,))
+    side, _ = pt.decide("decision", model_p_yes=0.60, yes_bid=0.40, yes_ask=0.44, minutes_left=5.0,
+                                   decision_rule=rule)
+    assert side == "yes"
+    side, _ = pt.decide("decision", model_p_yes=0.20, yes_bid=0.40, yes_ask=0.44, minutes_left=5.0,
+                                   decision_rule=rule)
+    assert side == "no"
+    for kw in ({"decision_rule": None}, {"decision_rule": rule, "minutes_left": None}):
+        args = {"model_p_yes": 0.9, "yes_bid": 0.40, "yes_ask": 0.44, "minutes_left": 5.0, **kw}
+        assert pt.decide("decision", **args)[0] is None

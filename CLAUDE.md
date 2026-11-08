@@ -166,6 +166,17 @@ such, not slipped in quietly.
   edge (principle 1; the study found none). Once-per-market is enforced by
   `place_order(once_per_market=True)` through `append_row`'s locked `skip_if`,
   so two open tabs place one order; the order is re-decided on a fresh quote.
+- `kalshi_decision.py` -- the dashboard's BUY YES / BUY NO / NO TRADE line (and HOLD TO SETTLE / EXIT NOW for a
+  held paper position). One vectorized core (`rule_side`) serves both the live `decide_action()` and the
+  walk-forward backtest, so what is backtested is what runs. A `Rule` = margin, `shrink` (p_hat = mid +
+  shrink * (p_model - mid)), horizons, price band; costs are the study's (ask / 1 - bid + `order_fee`).
+  `walk_forward()` picks each fold's rule on earlier days only and trades the next block, one entry per market;
+  a rule is chosen only if its train mean beats zero by 2 SE on >= 200 trades, else NO TRADE. The OOS record is
+  shown next to the action. `review/kalshi_decision_backtest.py` (needs `study_data/model_obs.csv` from
+  `kalshi_market_study.py step3`) writes `decision_backtest.json`; no file = NO TRADE always. A backtest on
+  data earlier studies already saw, not a pre-registered test; never present the action as proven edge.
+  `paper_trading` has a matching "decision" auto rule (its own `source`). Live horizon windows are the
+  backtested snapshots (10/5/2 min) +/- 1; outside them the line says so.
 - `kalshi_study.py` -- the KXBTC15M edge study (REVIEW_FINDINGS.md, "Is
   there an edge?"): fetches and caches every settled market and its
   1-minute candlesticks, plus Coinbase 1-minute history, into
@@ -563,6 +574,7 @@ python kalshi_api.py              # sanity-check Kalshi API connectivity
 python kalshi.py --strike X --minutes Y   # one-off Kalshi fair-value check
 python analyze_correlation.py     # needs LOG_ALL_SIGNALS=True first
 python kalshi_tracking.py         # needs LOG_KALSHI_PREDICTIONS=True first
+python review/kalshi_decision_backtest.py   # walk-forward the decision rule (after step3) -> decision_backtest.json
 python paper_trading.py          # settle due paper trades and print the account
 python review/kalshi_scalp_backtest.py   # scalping backtest on the cached study data (run kalshi_market_study.py fetch first)
 python edge_recorder.py --capture        # save verbatim Kalshi orderbook/trades payloads to tests/fixtures/ (do this first, then pytest)

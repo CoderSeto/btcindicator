@@ -24,6 +24,7 @@ import config as shared_config
 import exchange_feeds
 import kalshi
 import kalshi_api
+import kalshi_decision
 import kalshi_tracking
 import orderbook
 import orderbook_feeds
@@ -360,6 +361,22 @@ if (kalshi_live and kalshi_live["available"]
         and kalshi_live["yes_bid"] is not None and kalshi_live["yes_ask"] is not None):
     kalshi_quote = (kalshi_live["yes_bid"] + kalshi_live["yes_ask"]) / 2
 
+# The trade decision for the tracked market (kalshi_decision): fee-aware, defaults to NO TRADE,
+# and shows its own walk-forward record. Held positions get HOLD / EXIT from the same rule.
+decision = decision_exit = None
+decision_rule, decision_result = kalshi_decision.load_active(cfg.DECISION_BACKTEST_PATH)
+if (kalshi_result["available"] and kalshi_live and kalshi_live["available"]
+        and kalshi_result["strike"] == kalshi_live["strike"]):
+    decision = kalshi_decision.decide_action(
+        decision_rule, kalshi_result["p_yes"], kalshi_live["yes_bid"], kalshi_live["yes_ask"],
+        kalshi_result["minutes_remaining"], 1, decision_result)
+    held = [t for t in paper_trading.load_trades(cfg.PAPER_TRADE_LOG_PATH)
+            if t["status"] == "open" and t["ticker"] == kalshi_live["ticker"]]
+    if held:
+        decision_exit = kalshi_decision.decide_exit(
+            held[-1]["side"], kalshi_result["p_yes"], kalshi_live["yes_bid"], kalshi_live["yes_ask"],
+            kalshi_result["minutes_remaining"], decision_rule, held[-1]["contracts"])
+
 # --- Header strip -----------------------------------------------------------
 title_col, alert_col = st.columns([3, 2])
 with title_col:
@@ -517,7 +534,18 @@ with left:
             st.caption(_esc(" \u00b7 ".join(bits)))
             if stale_price_warning:
                 st.caption(_esc(stale_price_warning))
-            if kalshi_quote is not None:
+            if decision is not None:
+                icon = {"BUY YES": "\U0001F7E2", "BUY NO": "\U0001F534", "NO TRADE": "\u26AA"}[decision["action"]]
+                head = f"{icon} **{decision['action']}**"
+                if decision["price"] is not None:
+                    head += f" @ {decision['price'] * 100:.0f}\u00a2 (+{decision['fee'] * 100:.0f}\u00a2 fee)"
+                if decision_exit is not None:
+                    head += f" \u00b7 held: **{decision_exit['action']}**"
+                st.markdown(_esc(head))
+                st.caption(_esc(" ".join(decision["reasons"] + ([decision["flip"] + "."] if decision["flip"] else []))
+                                + (" " + decision_exit["reason"] + "." if decision_exit is not None else "")))
+                st.caption(_esc(decision["evidence"] + " " + decision["caveat"]))
+            elif kalshi_quote is not None:
                 st.caption(_esc(MODEL_VS_MARKET_NOTE))
             if kalshi_result["final_minute"]:
                 st.caption("\u26A0\uFE0F Final minute: part of the settlement average is already "
@@ -781,7 +809,8 @@ with tab_paper, st.container(height=TAB_BODY_HEIGHT, border=False):
             if cfg.PAPER_AUTO_STRATEGY in paper_trading.STRATEGIES else 0,
             key="paper_auto_strategy", label_visibility="collapsed",
             help="composite: follow the bot's composite signal when it is strong enough to alert. "
-                 "model: trade toward the Kalshi fair-value model when its edge beats the fee.")
+                 "model: trade toward the Kalshi fair-value model when its edge beats the fee. "
+                 "decision: the walk-forward-selected rule shown on the dashboard (no rule = no trades).")
     with ac3:
         auto_contracts = st.number_input("Auto contracts", min_value=1, step=1, value=cfg.PAPER_AUTO_CONTRACTS,
                                          key="paper_auto_contracts", label_visibility="collapsed")

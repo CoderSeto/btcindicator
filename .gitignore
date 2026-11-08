@@ -41,3 +41,4 @@ Thumbs.db
 *.swp
 edge_record.csv
 edge_trades.csv
+decision_backtest.json
