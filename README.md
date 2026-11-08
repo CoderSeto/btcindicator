@@ -626,9 +626,8 @@ With "Auto-track current window" checked (the dashboard default):
   for the current window (more precise than assuming a clean quarter-hour
   boundary, since it comes straight from the market record).
 - **Kalshi's own quoted price** shows up as a 4th metric next to the
-  model's P(YES)/P(NO), with the gap between them called out directly --
-  that gap is the actual "is there an edge here" question, though see the
-  caveat below before reading too much into it.
+  model's P(YES)/P(NO), with the gap between them called out directly.
+  **That gap is not a trading signal:** see below.
 
 **Sanity-check it yourself.** This was verified against Kalshi's live
 API on 2026-11-07, and the tests run on real captured payloads, but
@@ -639,11 +638,17 @@ minutes. If something looks off (particularly if `SERIES_TICKER` in the
 file, currently `"KXBTC15M"`, ever needs to change -- Kalshi does
 restructure series occasionally), that's the first thing to check.
 
-**The gap is a starting point, not a signal.** A meaningful difference
-between the model's P(YES) and Kalshi's own quote could reflect a real
-mispricing -- or just this model's own approximations (the basis-risk and
-settlement-averaging caveats above) being wrong instead of the market.
-Worth understanding *why* a gap exists before trusting it.
+**The gap is not a signal -- this was tested.** A study of 30,688
+settled KXBTC15M contracts (2025-12-15 to 2026-11-08, the last 30% held
+out) scored this model against Kalshi's own mid 10, 5 and 2 minutes
+before close. The model was never better. It was significantly worse at
+5 and 2 minutes on the held-out contracts, and trading toward it lost
+money after the spread and Kalshi's fee. The market's own prices showed
+no edge either. A gap between the model and the quote is far more likely
+to be this model's approximations (Coinbase standing in for the settlement
+index -- see basis risk below -- and volatility from 1-minute candles) than
+a mispricing. Details, including what size of edge the data
+rules out: REVIEW_FINDINGS.md, "Is there an edge?".
 
 **Limitations, stated plainly:**
 

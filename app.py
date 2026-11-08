@@ -333,6 +333,13 @@ if (kalshi_result["available"] and kalshi_live and kalshi_live["available"]
         p_yes_point=kalshi_result["p_yes_point"],
     )
 
+# The study's answer to "is the model-vs-market gap an edge?", shown wherever the gap is.
+MODEL_VS_MARKET_NOTE = (
+    "Model minus market is not a trading signal. On 30,688 settled KXBTC15M contracts the model "
+    "scored worse than Kalshi's own mid on held-out data, and trading toward it lost money after "
+    "fees (REVIEW_FINDINGS.md, \"Is there an edge?\")."
+)
+
 kalshi_quote = None
 if (kalshi_live and kalshi_live["available"]
         and kalshi_live["yes_bid"] is not None and kalshi_live["yes_ask"] is not None):
@@ -406,7 +413,8 @@ with head_cols[3]:
                    f"{kalshi_result['minutes_remaining']:.1f} min left")
             st.metric("Kalshi P(YES)", f"{kalshi_result['p_yes'] * 100:.1f}%", gap,
                       help="Model fair value for the strike below. Never blended with the "
-                           "bot's directional signals -- see the Notes tab.")
+                           "bot's directional signals -- see the Notes tab."
+                           + (" " + MODEL_VS_MARKET_NOTE if kalshi_quote is not None else ""))
 
 # --- Signal badges ----------------------------------------------------------
 short_labels = {
@@ -494,6 +502,8 @@ with left:
             st.caption(_esc(" \u00b7 ".join(bits)))
             if stale_price_warning:
                 st.caption(_esc(stale_price_warning))
+            if kalshi_quote is not None:
+                st.caption(_esc(MODEL_VS_MARKET_NOTE))
             if kalshi_result["final_minute"]:
                 st.caption("\u26A0\uFE0F Final minute: part of the settlement average is already "
                            "fixed, and it's assumed to equal the current price. Rough.")
@@ -717,9 +727,9 @@ with tab_notes, st.container(height=TAB_BODY_HEIGHT, border=False):
 
         if kalshi_quote is not None and kalshi_result["available"]:
             st.caption(
-                "**On the model-vs-market gap:** it can reflect a real mispricing, or just this "
-                "model's own approximations above being wrong instead. Worth understanding why "
-                "before trusting it."
+                "**On the model-vs-market gap:** " + _esc(MODEL_VS_MARKET_NOTE) + " A gap is far "
+                "more often this model's own approximations above (Coinbase as a proxy for the "
+                "index, minute-level data) than a mispricing."
             )
 
         path = _strike_path_liquidity(book_snapshot, kalshi_result, cfg)

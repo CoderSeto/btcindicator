@@ -732,6 +732,32 @@ def test_a_bad_strike_from_kalshi_shows_the_reason_instead_of_a_certain_p_yes(en
     assert not pathlib.Path(cfg.KALSHI_PREDICTIONS_LOG_PATH).exists()      # nothing logged
 
 
+def test_the_model_vs_market_gap_carries_the_studys_answer_wherever_it_is_shown(env):
+    # REVIEW_FINDINGS "Is there an edge?": the model scored worse than Kalshi's mid on held-out
+    # contracts, so the "pts vs market" gap must not read as an edge.
+    at = run()
+    no_exception(at)
+    assert metric(at, "Kalshi P(YES)").delta.endswith("pts vs market")
+    assert "not a trading signal" in metric(at, "Kalshi P(YES)").help
+    captions = [c.value for c in at.caption if "not a trading signal" in c.value]
+    assert captions, "no caveat next to the Market YES gap"
+    assert all("scored worse than Kalshi's own mid on held-out data" in c and "Is there an edge?" in c
+               for c in captions)
+    notes = all_text(at)
+    assert "it can reflect a real mispricing" not in notes                 # the old framing is gone
+    # With no market quote there is no gap, and no caveat about one.
+    at.checkbox(key="kalshi_auto_track").uncheck().run()
+    assert not [c for c in at.caption if "not a trading signal" in c.value]
+    assert "not a trading signal" not in (metric(at, "Kalshi P(YES)").help or "")
+
+
+def test_readme_answers_the_edge_question_next_to_the_gap():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "is there an edge here\" question" not in readme
+    assert "**The gap is not a signal -- this was tested.**" in readme
+    assert "That gap is not a trading signal" in readme
+
+
 def test_notes_describe_the_settlement_average_model_and_its_final_minute_limit(env):
     # P(YES) now prices the 60-second average (kalshi.settlement_probability). What remains a
     # limitation is the final minute, where the already-elapsed prints are taken at spot.
