@@ -1,8 +1,7 @@
 # KXBTC15M decision rules -- measured, not assumed
 
-Pre-cutoff study rows only (`edge_hunt.load_exploration`, 246 days to 2026-08-17). Scripts: `review/kalshi_decision_rules.py
-<timing|exit|regime|features|peek>`. Fills: YES at ask, NO at 1 - bid, `kalshi_study.order_fee`, one entry per market.
-cost = half-spread + fee per contract. CIs are day-block bootstrap 95%. Frozen tables live in `kalshi_decision.py`.
+Pre-cutoff rows only (`edge_hunt.load_exploration`, 246 days to 2026-08-17); `review/kalshi_decision_rules.py <timing|exit|regime|features|peek>`.
+Fills: YES at ask, NO at 1 - bid, `kalshi_study.order_fee`, one entry per market. cost = half-spread + fee. CIs: day-block 95%. Frozen tables: `kalshi_decision.py`.
 
 ## 1. Entry timing -> ENTER NOW / WAIT / SKIP (`entry_timing`)
 
