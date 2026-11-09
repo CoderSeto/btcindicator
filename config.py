@@ -229,11 +229,21 @@ AGG_DELTA_BACKTEST_MAX_REQUESTS = 300
 # regime change; shorter = more responsive but noisier. 120 (2 hours) is
 # a reasonable middle ground for a contract this short-dated.
 KALSHI_VOL_LOOKBACK_MINUTES = 120
-# The dashboard asks Kalshi for the open KXBTC15M market at most once per
-# this many seconds, shared across every open tab (the countdown is still
-# recomputed on every refresh). Kalshi has answered HTTP 429 to per-refresh
-# polling before. 0 polls on every refresh.
-KALSHI_POLL_SECONDS = 10
+# Kalshi quote polling (kalshi_api.QuotePoller): one poll shared by every tab,
+# at an adaptive interval -- starts at the minimum, doubles on 429 / 5xx /
+# timeout (or waits Retry-After), shrinks 20% after 30 straight successes.
+# Probe 2026-11-08 (DASHBOARD_NOTES.md): 0.5s sustained for a minute with no
+# 429 and no rate-limit headers, so the minimum is that measured rate.
+KALSHI_POLL_MIN_SECONDS = 0.5
+KALSHI_POLL_MAX_SECONDS = 10.0
+# The market record (ticker, strike, close) is re-read this often; its quote lags
+# the orderbook, so the quote itself always comes from the orderbook.
+KALSHI_MARKET_REFRESH_SECONDS = 30.0
+# A quote older than this forces NO TRADE on the decision line.
+KALSHI_MAX_QUOTE_AGE_SECONDS = 5.0
+# The dashboard's live strip (price, quote, decision) reruns on its own at this
+# interval; the rest of the page keeps POLL_INTERVAL.
+STRIP_REFRESH_SECONDS = 1.0
 # Refuse to price a strike further than this fraction from spot (0.05 = 5%).
 # BTC doesn't move 5% inside one 15-minute window, so a strike that far off is
 # almost certainly a bad record: Kalshi's own API has served two KXBTC15M

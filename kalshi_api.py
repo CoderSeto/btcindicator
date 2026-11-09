@@ -20,6 +20,7 @@ tests/fixtures/. Re-run the live check any time:
     python kalshi_api.py
 """
 import threading
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -120,43 +121,194 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# One process-wide cache: Streamlit runs every browser tab in the same process,
-# so this caps the whole dashboard at one Kalshi request per max_age, not one
-# per tab per rerun.
-_poll_cache = {"at": None, "result": None}
-_poll_lock = threading.Lock()
+# --- The shared, adaptive quote poll (the dashboard's live strip) -----------
+#
+# Measured from the user's machine on 2026-11-08 (DASHBOARD_NOTES.md,
+# review/kalshi_poll_probe.py): the market record's yes_bid/yes_ask -- both
+# /markets?series_ticker= and /markets/{ticker} -- lagged the live book by
+# tens of seconds (0 of 15 back-to-back reads agreed; the list sat on one
+# quote for ~20s while the book moved 8c), while /markets/{ticker}/orderbook
+# ?depth=1 is live and 91 bytes against ~2.1 KB. So the quote comes from the
+# orderbook; the market record is read only for the ticker, strike and close
+# time (once per KALSHI_MARKET_REFRESH_SECONDS, and as soon as the window
+# closes). No rate-limit headers were returned, and 120 requests a minute
+# drew no 429, so nothing here assumes a limit: it backs off when Kalshi says so.
+
+class RateLimited(Exception):
+    """Kalshi answered 429 / 5xx or timed out; `retry_after` is its Retry-After in seconds, if any."""
+
+    def __init__(self, message, retry_after=None):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
-def cached_btc15m_market(max_age_seconds: float) -> dict:
+def _retry_after(resp):
+    v = resp.headers.get("Retry-After") if resp is not None else None
+    try:
+        return max(0.0, float(v)) if v is not None else None
+    except ValueError:
+        return None
+
+
+def _backoff_error(e):
+    """A RateLimited for errors that call for backing off, else None (re-raise)."""
+    if isinstance(e, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return RateLimited(f"{type(e).__name__}: {e}")
+    if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
+        code = e.response.status_code
+        if code == 429 or code >= 500:
+            return RateLimited(f"HTTP {code}", _retry_after(e.response))
+    return None
+
+
+class QuotePoller:
     """
-    current_btc15m_market(), fetched at most once per `max_age_seconds`
-    across the process. The dashboard used to poll on every rerun of every
-    tab -- 12 requests a minute per tab at a 5s refresh -- and Kalshi has
-    answered HTTP 429 before.
+    One Kalshi poll for the whole process (Streamlit runs every tab and session in
+    one process), at an adaptive interval:
 
-    `minutes_remaining` is recomputed from the clock on every call, so the
-    countdown never freezes on a cached value. A cached market whose close
-    time has passed is refetched straight away (the next window has opened),
-    whatever its age. Failures are cached too, so a rate-limit response
-    isn't answered with an immediate retry. max_age_seconds <= 0 disables
-    the cache.
+      - starts at `min_s`; a call within the interval gets the cached quote;
+      - 429, 5xx, timeout or connection error: honour Retry-After if given, else
+        double the interval (capped at `max_s`), and send nothing until it passes;
+      - after `shrink_after` consecutive successes, shrink the interval by
+        `shrink` (x0.8) toward `min_s`.
+
+    Only one caller fetches at a time; the others get the cached quote rather than
+    queueing a second request. Each result carries `quote_age_seconds` (since the
+    book was read), so a stale quote can never pass for a live one.
     """
-    now = _now()
-    with _poll_lock:
-        at, result = _poll_cache["at"], _poll_cache["result"]
-        fresh = (
-            at is not None
-            and max_age_seconds > 0
-            and 0 <= (now - at).total_seconds() < max_age_seconds
-            and not (result.get("available") and result["close_time"] <= now)
-        )
-        if not fresh:
-            result = current_btc15m_market()
-            _poll_cache["at"], _poll_cache["result"] = now, result
-    out = dict(result)
-    if out.get("available"):
-        out["minutes_remaining"] = max(0.0, (out["close_time"] - now).total_seconds() / 60.0)
-    return out
+
+    def __init__(self, min_s, max_s, market_refresh_s, shrink_after=30, shrink=0.8, clock=None):
+        self.min_s, self.max_s, self.market_refresh_s = float(min_s), float(max_s), float(market_refresh_s)
+        self.shrink_after, self.shrink = int(shrink_after), float(shrink)
+        self.clock = clock or time.monotonic
+        self.interval = self.min_s
+        self.next_at = None              # monotonic time the next request may go out
+        self.successes = 0
+        self.requests = 0
+        self.last_429 = None             # wall-clock datetime of the last 429
+        self.last_error = None
+        self.market = None               # parse_market() of the open window
+        self.market_at = None
+        self.quote = None                # parse_orderbook() top of book for self.market
+        self.quote_at = None
+        self._lock = threading.Lock()
+        self._in_flight = False
+
+    def _fail(self, err: RateLimited, wall):
+        self.successes = 0
+        self.last_error = str(err)
+        if "429" in str(err):
+            self.last_429 = wall
+        self.interval = min(self.max_s, err.retry_after if err.retry_after is not None else self.interval * 2)
+        self.next_at = self.clock() + self.interval
+
+    def _ok(self):
+        self.successes += 1
+        self.last_error = None
+        if self.successes >= self.shrink_after:
+            self.interval = max(self.min_s, self.interval * self.shrink)
+            self.successes = 0
+        self.next_at = self.clock() + self.interval
+
+    def _fetch(self, wall):
+        mono = self.clock()
+        need_market = (self.market is None or not self.market.get("available")
+                       or self.market["close_time"] <= wall
+                       or self.market_at is None or mono - self.market_at >= self.market_refresh_s)
+        if need_market:
+            self.requests += 1
+            m = current_btc15m_market()
+            if not m.get("available"):
+                reason = m.get("reason", "")
+                if reason.startswith("Couldn't reach"):          # a failed request, not "no market open"
+                    raise RateLimited(reason)
+                self.market, self.market_at, self.quote, self.quote_at = m, mono, None, None
+                return
+            if self.market is None or m.get("ticker") != self.market.get("ticker"):
+                self.quote, self.quote_at = None, None
+            self.market, self.market_at = m, mono
+        self.requests += 1
+        try:
+            top = parse_orderbook(get_orderbook(self.market["ticker"], depth=1))
+        except requests.exceptions.RequestException as e:
+            err = _backoff_error(e)
+            if err is None:
+                raise
+            raise err
+        self.quote, self.quote_at = top, self.clock()
+
+    def get(self, force: bool = False, wall=None) -> dict:
+        """The current market with the freshest quote (fetching if due, or `force` and not paused)."""
+        wall = wall or _now()
+        with self._lock:
+            mono = self.clock()
+            paused = self.next_at is not None and mono < self.next_at and self.last_error is not None
+            closed = self.market is not None and self.market.get("available") and self.market["close_time"] <= wall
+            due = self.next_at is None or mono >= self.next_at or closed or (force and not paused)
+            go = due and not self._in_flight
+            if go:
+                self._in_flight = True
+        if go:
+            try:
+                self._fetch(wall)
+            except RateLimited as e:
+                with self._lock:
+                    self._fail(e, wall)
+            except (requests.exceptions.RequestException, KalshiSchemaError) as e:
+                with self._lock:
+                    self._fail(RateLimited(f"{type(e).__name__}: {e}"), wall)
+            else:
+                with self._lock:
+                    self._ok()
+            finally:
+                with self._lock:
+                    self._in_flight = False
+        return self.snapshot(wall)
+
+    def snapshot(self, wall=None) -> dict:
+        wall = wall or _now()
+        with self._lock:
+            info = {"poll_interval": self.interval, "last_429": self.last_429, "requests": self.requests,
+                    "poll_error": self.last_error}
+            if self.market is None:
+                return {"available": False, "reason": f"Couldn't reach Kalshi's API: {self.last_error}"
+                        if self.last_error else "Kalshi not polled yet.", **info}
+            out = dict(self.market, **info)
+        if not out.get("available"):
+            return out
+        out["minutes_remaining"] = max(0.0, (out["close_time"] - wall).total_seconds() / 60.0)
+        if self.quote is None:
+            out.update(yes_bid=None, yes_ask=None, quote_age_seconds=None, quote_source=None)
+        else:
+            out.update(yes_bid=self.quote["yes_bid"], yes_ask=self.quote["yes_ask"],
+                       quote_age_seconds=max(0.0, self.clock() - self.quote_at), quote_source="orderbook")
+        return out
+
+
+_poller = None
+_poller_lock = threading.Lock()
+
+
+def shared_poller(min_s, max_s, market_refresh_s) -> QuotePoller:
+    """The process-wide QuotePoller (created on first use; later settings are ignored)."""
+    global _poller
+    with _poller_lock:
+        if _poller is None:
+            _poller = QuotePoller(min_s, max_s, market_refresh_s)
+        return _poller
+
+
+def reset_shared_poller():
+    """Drop the process-wide poller (tests)."""
+    global _poller
+    with _poller_lock:
+        _poller = None
+
+
+def live_market(cfg, force: bool = False) -> dict:
+    """The dashboard's quote: the shared poll, at cfg's KALSHI_POLL_* settings."""
+    return shared_poller(cfg.KALSHI_POLL_MIN_SECONDS, cfg.KALSHI_POLL_MAX_SECONDS,
+                         cfg.KALSHI_MARKET_REFRESH_SECONDS).get(force=force)
 
 
 if __name__ == "__main__":

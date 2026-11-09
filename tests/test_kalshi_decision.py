@@ -256,3 +256,12 @@ def test_decision_line_is_one_markdown_line_with_action_timing_grade_and_cost():
     assert "\n" not in line
     held = kd.decision_line(d, q, t, {"action": "HOLD TO SETTLE"})
     assert held.endswith(" \u00b7 held: **HOLD TO SETTLE**")
+
+
+def test_a_stale_quote_forces_no_trade_whatever_the_rule():
+    rule = kd.Rule(margin=0.0, shrink=1.0, horizons=(5,), band=None)
+    fresh = kd.decide_action(rule, 0.90, 0.50, 0.52, 5.0, quote_age_seconds=4.9, max_quote_age_seconds=5.0)
+    assert fresh["action"] == "BUY YES"
+    stale = kd.decide_action(rule, 0.90, 0.50, 0.52, 5.0, quote_age_seconds=5.1, max_quote_age_seconds=5.0)
+    assert stale["action"] == "NO TRADE" and stale["reasons"] == [
+        "Kalshi quote is 5s old (limit 5s): not acting on a stale price"]

@@ -465,7 +465,8 @@ def decision_line(decision: dict, quality: dict, timing: dict, held: dict = None
     return head
 
 
-def decide_action(rule, p_model, yes_bid, yes_ask, minutes_left, contracts: int = 1, result=None) -> dict:
+def decide_action(rule, p_model, yes_bid, yes_ask, minutes_left, contracts: int = 1, result=None,
+                  quote_age_seconds=None, max_quote_age_seconds=None) -> dict:
     """
     One live decision. Returns {"action": "BUY YES" | "BUY NO" | "NO TRADE", "side", "price", "fee",
     "breakeven", "edge", "reasons": [...], "flip": str, "evidence": str}. `rule` None (no backtest, or it
@@ -475,6 +476,11 @@ def decide_action(rule, p_model, yes_bid, yes_ask, minutes_left, contracts: int 
            "reasons": [], "flip": "", "evidence": oos_line(result) if result else "", "caveat": NO_EDGE_LINE}
     if yes_bid is None or yes_ask is None:
         out["reasons"].append("no two-sided Kalshi quote")
+        return out
+    if (max_quote_age_seconds is not None and quote_age_seconds is not None
+            and quote_age_seconds > max_quote_age_seconds):
+        out["reasons"].append(f"Kalshi quote is {quote_age_seconds:.0f}s old (limit {max_quote_age_seconds:g}s): "
+                              f"not acting on a stale price")
         return out
     if not ks.valid_book(yes_bid, yes_ask):
         out["reasons"].append(f"book not tradable (bid {yes_bid:.2f}, ask {yes_ask:.2f}; spread over "

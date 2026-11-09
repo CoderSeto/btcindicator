@@ -1,0 +1,64 @@
+{
+ "captured_utc": "2026-11-09T00:41:30Z",
+ "market_record": {
+  "bytes": 2135,
+  "headers": {
+   "Connection": "keep-alive",
+   "Content-Type": "application/json",
+   "Date": "Mon, 09 Nov 2026 00:41:30 GMT",
+   "Transfer-Encoding": "chunked",
+   "content-security-policy": "default-src 'none';",
+   "strict-transport-security": "max-age=31536000; includeSubDomains",
+   "vary": "Accept-Encoding",
+   "x-content-type-options": "nosniff",
+   "x-kalshi-cache-hits": "1"
+  },
+  "status": 200
+ },
+ "markets_list": {
+  "bytes": 2151,
+  "headers": {
+   "Connection": "keep-alive",
+   "Content-Type": "application/json",
+   "Date": "Mon, 09 Nov 2026 00:41:30 GMT",
+   "Transfer-Encoding": "chunked",
+   "cache-control": "public, max-age=15",
+   "content-security-policy": "default-src 'none';",
+   "strict-transport-security": "max-age=31536000; includeSubDomains",
+   "vary": "Accept-Encoding, Accept-Language",
+   "x-content-type-options": "nosniff",
+   "x-kalshi-cache-hits": "1"
+  },
+  "status": 200
+ },
+ "orderbook_depth1": {
+  "body": {
+   "orderbook_fp": {
+    "no_dollars": [
+     [
+      "0.7700",
+      "6295.20"
+     ]
+    ],
+    "yes_dollars": [
+     [
+      "0.2200",
+      "1022.19"
+     ]
+    ]
+   }
+  },
+  "bytes": 91,
+  "headers": {
+   "Connection": "keep-alive",
+   "Content-Length": "91",
+   "Content-Type": "application/json; charset=utf-8",
+   "Date": "Mon, 09 Nov 2026 00:41:30 GMT",
+   "content-security-policy": "default-src 'none';",
+   "strict-transport-security": "max-age=31536000; includeSubDomains",
+   "x-content-type-options": "nosniff"
+  },
+  "status": 200
+ },
+ "ticker": "KXBTC15M-26NOV081945-45"
+}

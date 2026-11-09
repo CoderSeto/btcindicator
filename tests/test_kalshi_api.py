@@ -295,56 +295,159 @@ def test_a_close_time_without_a_timezone_is_read_as_utc_not_a_crash():
     assert parsed["close_time"].tzinfo is not None
 
 
-# ---------- the shared poll cache (REVIEW_FINDINGS D10) ----------
+# ---------- the shared, adaptive quote poll (kalshi_api.QuotePoller) ----------
 #
-# The dashboard polled Kalshi on every rerun of every tab (12 requests a minute per tab at a 5s
-# refresh), and Kalshi has answered 429 before. cached_btc15m_market() fetches at most once per
-# max_age across the whole process, but recomputes minutes_remaining from the clock on every call,
-# so the countdown never freezes on a cached value.
+# One poll for the whole process; quote from the orderbook (the market record's quote lagged the
+# live book in the 2026-11-08 probe); backoff on 429 / 5xx / timeout, Retry-After honoured; the
+# interval shrinks 20% after 30 straight successes. Clock and network are faked.
+
+def _book(yes_bid, yes_ask):
+    return {"orderbook_fp": {"yes_dollars": [[f"{yes_bid:.4f}", "10"]], "no_dollars": [[f"{1 - yes_ask:.4f}", "10"]]}}
+
+
+def _http_error(code, retry_after=None):
+    resp = requests.Response()
+    resp.status_code = code
+    if retry_after is not None:
+        resp.headers["Retry-After"] = str(retry_after)
+    return requests.exceptions.HTTPError(f"{code} error", response=resp)
+
 
 @pytest.fixture
-def poll(monkeypatch):
+def qp(monkeypatch):
+    st = {"t": 1000.0, "market_calls": 0, "book_calls": 0, "book": _book(0.43, 0.44), "error": None,
+          "market": kalshi_api.parse_market(OPEN_MARKET, now=NOW)}
+
+    def market():
+        st["market_calls"] += 1
+        return st["market"]
+
+    def book(ticker, depth=10):
+        st["book_calls"] += 1
+        assert depth == 1
+        if st["error"] is not None:
+            raise st["error"]
+        return st["book"]
+    monkeypatch.setattr(kalshi_api, "current_btc15m_market", market)
+    monkeypatch.setattr(kalshi_api, "get_orderbook", book)
+    monkeypatch.setattr(kalshi_api, "_now", lambda: NOW)
+    st["poller"] = kalshi_api.QuotePoller(0.5, 10.0, 30.0, clock=lambda: st["t"])
+    return st
+
+
+def test_poller_quotes_from_the_orderbook_and_caches_within_the_interval(qp):
+    p = qp["poller"]
+    out = p.get()
+    assert (out["yes_bid"], out["yes_ask"], out["quote_source"]) == (0.43, 0.44, "orderbook")
+    assert out["quote_age_seconds"] == 0.0 and out["minutes_remaining"] == pytest.approx(7.5)
+    qp["t"] += 0.3
+    again = p.get()
+    assert qp["book_calls"] == 1 and again["quote_age_seconds"] == pytest.approx(0.3)
+    qp["t"] += 0.2                                                    # interval (0.5s) reached
+    p.get()
+    assert qp["book_calls"] == 2 and qp["market_calls"] == 1          # record re-read only every 30s
+    qp["t"] += 30
+    p.get()
+    assert qp["market_calls"] == 2
+
+
+def test_poller_doubles_the_interval_on_429_and_pauses_until_it_passes(qp):
+    p = qp["poller"]
+    p.get()
+    qp["error"] = _http_error(429)
+    qp["t"] += 0.5
+    out = p.get()
+    assert p.interval == 1.0 and p.last_429 == NOW and qp["book_calls"] == 2
+    assert out["yes_bid"] == 0.43 and out["quote_age_seconds"] == pytest.approx(0.5)   # old quote, aged
+    qp["t"] += 0.9
+    p.get(force=True)                                                 # paused: even force sends nothing
+    assert qp["book_calls"] == 2
+    qp["t"] += 0.1
+    p.get()
+    assert qp["book_calls"] == 3 and p.interval == 2.0                # still 429: doubled again
+    for _ in range(5):
+        qp["t"] += p.interval
+        p.get()
+    assert p.interval == 10.0                                         # capped at the max
+
+
+def test_poller_honours_retry_after(qp):
+    p = qp["poller"]
+    qp["error"] = _http_error(429, retry_after=7)
+    p.get()
+    assert p.interval == 7.0
+    qp["t"] += 6.9
+    p.get()
+    assert qp["book_calls"] == 1
+    qp["t"] += 0.1
+    p.get()
+    assert qp["book_calls"] == 2
+
+
+@pytest.mark.parametrize("err", [_http_error(503), requests.exceptions.Timeout("read timed out"),
+                                 requests.exceptions.ConnectionError("reset")])
+def test_poller_backs_off_on_5xx_and_timeouts_too(qp, err):
+    qp["error"] = err
+    qp["poller"].get()
+    assert qp["poller"].interval == 1.0 and qp["poller"].last_429 is None
+
+
+def test_poller_shrinks_20_percent_after_30_straight_successes(qp):
+    p = qp["poller"]
+    p.interval = 8.0
+    for i in range(29):
+        p.get()
+        qp["t"] += p.interval
+    assert p.interval == 8.0
+    p.get()
+    assert p.interval == pytest.approx(6.4)
+    p.interval = 0.55
+    p.successes = 29
+    qp["t"] += 10
+    p.get()
+    assert p.interval == 0.5                                          # never below the minimum
+
+
+def test_one_poll_is_shared_across_sessions(qp, monkeypatch):
+    import config
+    kalshi_api.reset_shared_poller()
+    monkeypatch.setattr(kalshi_api, "_poller", None)
+    clock = qp["t"]
+    a = kalshi_api.shared_poller(0.5, 10, 30)
+    a.clock = lambda: clock
+    b = kalshi_api.shared_poller(0.5, 10, 30)                         # a second session / tab
+    assert a is b
+    kalshi_api.live_market(config)
+    kalshi_api.live_market(config)
+    assert qp["book_calls"] == 1
+
+
+def test_a_closed_window_drops_the_old_quote_and_reads_the_next_market(qp):
     from datetime import timedelta
-    state = {"calls": 0, "result": kalshi_api.parse_market(OPEN_MARKET, now=NOW), "now": NOW}
-
-    def fetch():
-        state["calls"] += 1
-        return state["result"]
-    monkeypatch.setattr(kalshi_api, "current_btc15m_market", fetch)
-    monkeypatch.setattr(kalshi_api, "_now", lambda: state["now"])
-    monkeypatch.setattr(kalshi_api, "_poll_cache", {"at": None, "result": None})
-    state["advance"] = lambda s: state.__setitem__("now", state["now"] + timedelta(seconds=s))
-    return state
+    p = qp["poller"]
+    p.get()
+    later = NOW + timedelta(minutes=7.5)
+    nxt = dict(qp["market"], ticker="KXBTC15M-NEXT", close_time=later + timedelta(minutes=15))
+    qp["market"] = nxt
+    qp["error"] = requests.exceptions.Timeout("x")
+    out = p.get(wall=later)
+    assert out["ticker"] == "KXBTC15M-NEXT" and out["yes_bid"] is None   # never the last window's quote
 
 
-def test_poll_is_shared_within_max_age_but_the_countdown_keeps_moving(poll):
-    assert kalshi_api.cached_btc15m_market(10)["minutes_remaining"] == pytest.approx(7.5)
-    poll["advance"](6)
-    again = kalshi_api.cached_btc15m_market(10)
-    assert poll["calls"] == 1                                              # served from the cache
-    assert again["minutes_remaining"] == pytest.approx(7.4)                # but 6s later on the clock
-    poll["advance"](5)                                                     # 11s after the fetch
-    kalshi_api.cached_btc15m_market(10)
-    assert poll["calls"] == 2
+def test_orderbook_top_and_market_record_use_the_same_convention():
+    # The fixture's market record: YES bid 0.43, NO bid 0.56 -> YES ask 0.44. The same top of book
+    # expressed as Kalshi's bids-only orderbook must parse to the same YES bid/ask. (Live, the two
+    # endpoints disagree because the record lags -- DASHBOARD_NOTES.md -- not because of convention.)
+    rec = kalshi_api.parse_market(OPEN_MARKET, now=NOW)
+    book = {"orderbook_fp": {"yes_dollars": [["0.4200", "5"], [OPEN_MARKET["yes_bid_dollars"], "9"]],
+                             "no_dollars": [[OPEN_MARKET["no_bid_dollars"], "7"], ["0.5500", "3"]]}}
+    top = kalshi_api.parse_orderbook(book)
+    assert (top["yes_bid"], top["yes_ask"]) == (rec["yes_bid"], rec["yes_ask"])
 
 
-def test_poll_refetches_once_the_cached_window_has_closed(poll):
-    kalshi_api.cached_btc15m_market(600)
-    poll["advance"](7.5 * 60)                                              # exactly at close
-    kalshi_api.cached_btc15m_market(600)
-    assert poll["calls"] == 2                                              # the next window, not a stale 0:00
-
-
-def test_poll_caches_failures_too_so_a_429_is_not_hammered(poll):
-    poll["result"] = {"available": False, "reason": "Couldn't reach Kalshi's API: 429"}
-    kalshi_api.cached_btc15m_market(10)
-    poll["advance"](3)
-    out = kalshi_api.cached_btc15m_market(10)
-    assert poll["calls"] == 1 and out["available"] is False
-
-
-def test_poll_max_age_zero_always_fetches_and_callers_cannot_mutate_the_cache(poll):
-    first = kalshi_api.cached_btc15m_market(0)
-    first["strike"] = -1.0
-    second = kalshi_api.cached_btc15m_market(0)
-    assert poll["calls"] == 2 and second["strike"] == 75_743.66
+def test_saved_live_headers_carry_no_rate_limit_fields():
+    cap = json.loads((pathlib.Path(__file__).parent / "fixtures" / "kalshi_response_headers.json").read_text(encoding="utf-8"))
+    for part in ("markets_list", "orderbook_depth1", "market_record"):
+        assert cap[part]["status"] == 200
+        assert not [h for h in cap[part]["headers"] if "ratelimit" in h.lower().replace("-", "")]
+    assert cap["orderbook_depth1"]["bytes"] < cap["market_record"]["bytes"] / 10
