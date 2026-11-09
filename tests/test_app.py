@@ -1133,7 +1133,8 @@ def test_decision_line_grades_the_entry_and_shows_its_cost_and_the_market_calibr
     at = run()
     no_exception(at)
     text = all_text(at)
-    assert "entry:" in text and any(g in text for g in ("GOOD", "EXPENSIVE", "AVOID"))
+    assert "entry " in text and any(f"**{g}**" in text for g in ("GOOD", "EXPENSIVE", "AVOID"))
+    assert any(f"**{t}**" in text for t in ("ENTER NOW", "WAIT", "SKIP")) and "Timing:" in text
     assert "to enter" in text and "Entry cost (half-spread + fee)" in text and "break-even YES" in text
 
 
@@ -1143,4 +1144,6 @@ def test_decision_line_calls_a_wide_book_expensive(env):
     no_exception(at)
     text = all_text(at)
     assert "EXPENSIVE" in text and "Spread 7c: entries 5-10c wide have cost ~5c" in text
+    assert ("**WAIT**" in text) or ("**ENTER NOW**" in text)          # the timing word sits on the decision line
+    assert "Timing:" in text and "such markets" in text
     assert "break-even YES 54.0%, NO 57.0%" in text        # ask 52 + 2c fee; 1 - bid 55 + 2c fee

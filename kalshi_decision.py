@@ -368,6 +368,103 @@ def calibration_line(cal) -> str:
             f"(n={cal['n']}, n_eff={cal['n_eff']}).")
 
 
+# --- entry timing and exit evidence -------------------------------------------
+#
+# Measured on the PRE-CUTOFF study rows (review/kalshi_decision_rules.py `timing` and
+# `exit`; DECISION_RULES.md). Paired within a market: the cost of entering at one cached
+# snapshot vs the next. The mid itself moved ~20c on average between snapshots, so
+# "cheaper later" never means "the same trade later".
+
+# (horizon now, spread band) -> markets, share still tradable at the next snapshot,
+# entry-cost change in cents (mean, CI low, CI high), mean |mid move| in cents
+TIMING_TABLE = {
+    (10, "<2c"): (17341, 0.987, -0.38, -0.40, -0.35, 20.7),
+    (10, "2-5c"): (4572, 0.970, -0.75, -0.81, -0.69, 22.0),
+    (10, "5c+"): (773, 0.875, -1.91, -2.17, -1.66, 20.6),
+    (5, "<2c"): (17887, 0.845, -0.25, -0.27, -0.22, 16.9),
+    (5, "2-5c"): (3749, 0.795, -0.64, -0.75, -0.54, 21.6),
+    (5, "5c+"): (643, 0.664, -1.72, -2.03, -1.41, 19.2),
+}
+# At the extremes (mid <= 10c or >= 90c) cost did not fall (+0.1c, CI above 0) and 10-30% of books closed.
+TIMING_EXTREME_TRADABLE = {10: 0.90, 5: 0.70}
+WAIT_MIN_TRADABLE = 0.85            # a WAIT needs at least this share of books still open later
+WAIT_MIN_SAVING_C = 1.0             # ... and at least this much cost saved (CI high must clear it)
+
+# Sell-back at the next snapshot's real bid (fee paid again) minus hold-to-settle, cents per
+# contract, both sides entered in every valid market: negative everywhere, in every price band,
+# and whether the mid had moved for or against the position (DECISION_RULES.md).
+EXIT_EVIDENCE = {
+    ("yes", 10, 2): (18567, 18166, -1.56, -1.95, -1.18),
+    ("no", 10, 2): (18567, 17623, -1.99, -2.38, -1.60),
+    ("yes", 5, 2): (18527, 18183, -1.56, -1.94, -1.18),
+    ("no", 5, 2): (18527, 17574, -1.99, -2.37, -1.60),
+}
+
+
+def _spread_band(spread) -> str:
+    if spread >= config.DECISION_SPREAD_EXPENSIVE - 1e-9:
+        return "5c+"
+    return "2-5c" if spread >= config.DECISION_WAIT_MIN_SPREAD - 1e-9 else "<2c"
+
+
+def entry_timing(quality: dict, minutes_left) -> dict:
+    """
+    ENTER NOW / WAIT / SKIP for the book `entry_quality` graded, with the measured reason.
+    SKIP: the grade is AVOID. WAIT: only where the cache shows the cost falling by at least
+    WAIT_MIN_SAVING_C by the next snapshot with at least WAIT_MIN_TRADABLE of books still
+    open -- in practice a 5c+ book at the 10-minute snapshot. Everything else is ENTER NOW,
+    because waiting saved under 1c, closed 2-34% of books, or there is no later snapshot.
+    Says nothing about which side.
+    """
+    if quality["grade"] == "AVOID":
+        return {"timing": "SKIP", "reason": "; ".join(quality["reasons"]) or "book not tradable"}
+    c = quality["cost"]
+    spread = 2 * c["half_spread"]
+    hz = nearest_horizon(minutes_left)
+    between = hz is None
+    if between:
+        hz = 10 if minutes_left > HORIZONS[1] else (5 if minutes_left > HORIZONS[2] else HORIZONS[2])
+    if hz == HORIZONS[-1]:
+        return {"timing": "ENTER NOW", "reason": "last cached snapshot; nothing later to wait for"}
+    extreme = c["mid"] <= config.DECISION_EXTREME_MID or c["mid"] >= 1 - config.DECISION_EXTREME_MID
+    nxt = HORIZONS[HORIZONS.index(hz) + 1]
+    pre = "between snapshots, nearest state: " if between else ""
+    if extreme:
+        return {"timing": "ENTER NOW", "reason": pre + f"at this price the entry cost did not fall by {nxt} min (+0.1c) and "
+                f"{1 - TIMING_EXTREME_TRADABLE[hz]:.0%} of books had closed"}
+    n, tradable, dc, lo, hi, move = TIMING_TABLE[(hz, _spread_band(spread))]
+    if tradable >= WAIT_MIN_TRADABLE and -hi >= WAIT_MIN_SAVING_C:
+        return {"timing": "WAIT", "reason": pre + f"entry cost fell {-dc:.1f}c [{-hi:.1f}, {-lo:.1f}] by {nxt} min in {n} such "
+                f"markets, {tradable:.0%} still tradable; the mid moved ~{move:.0f}c meanwhile, so the trade may not be there"}
+    return {"timing": "ENTER NOW", "reason": pre + f"waiting to {nxt} min saved only {-dc:.1f}c in {n} such markets and "
+            f"{1 - tradable:.0%} of books had closed; the mid moved ~{move:.0f}c meanwhile"}
+
+
+def exit_evidence(side: str, minutes_left) -> str:
+    key = (side, 10 if minutes_left > HORIZONS[1] else 5, 2)
+    if key not in EXIT_EVIDENCE:
+        return ""
+    n, n_eff, m, lo, hi = EXIT_EVIDENCE[key]
+    return (f"In the cache, selling {side.upper()} back at the next snapshot's bid lost {-m:.1f}c [{-hi:.1f}, {-lo:.1f}] "
+            f"per contract against holding (n={n}, n_eff={n_eff}), in every price band and whichever way the mid had moved.")
+
+
+def decision_line(decision: dict, quality: dict, timing: dict, held: dict = None) -> str:
+    """The one dashboard line: action, timing, grade, cost. Markdown; the reasons go in the caption."""
+    icon = {"BUY YES": "\U0001F7E2", "BUY NO": "\U0001F534", "NO TRADE": "\u26AA"}[decision["action"]]
+    head = f"{icon} **{decision['action']}**"
+    if decision["price"] is not None:
+        head += f" @ {decision['price'] * 100:.0f}\u00a2 (+{decision['fee'] * 100:.0f}\u00a2 fee)"
+    head += f" \u00b7 **{timing['timing']}**"
+    gi = {"GOOD": "\U0001F7E2", "EXPENSIVE": "\U0001F7E1", "AVOID": "\U0001F534"}[quality["grade"]]
+    head += f" \u00b7 entry {gi} **{quality['grade']}**"
+    if quality["cost_c"] is not None:
+        head += f" ({quality['cost_c']:.1f}\u00a2 to enter)"
+    if held is not None:
+        head += f" \u00b7 held: **{held['action']}**"
+    return head
+
+
 def decide_action(rule, p_model, yes_bid, yes_ask, minutes_left, contracts: int = 1, result=None) -> dict:
     """
     One live decision. Returns {"action": "BUY YES" | "BUY NO" | "NO TRADE", "side", "price", "fee",
@@ -427,7 +524,7 @@ def decide_exit(side: str, p_model, yes_bid, yes_ask, minutes_left, rule=None, c
     nothing beat it, so this rarely fires.
     """
     if side not in ("yes", "no") or yes_bid is None or yes_ask is None or not ks.valid_book(yes_bid, yes_ask):
-        return {"action": "HOLD TO SETTLE", "reason": "no tradable exit price"}
+        return {"action": "HOLD TO SETTLE", "reason": "no tradable exit price", "evidence": ""}
     mid = (yes_bid + yes_ask) / 2
     shrink = rule.shrink if rule is not None else 0.0
     p_yes = mid + shrink * (p_model - mid) if p_model is not None else mid
@@ -435,7 +532,8 @@ def decide_exit(side: str, p_model, yes_bid, yes_ask, minutes_left, rule=None, c
     fee = float(ks.fee_per_contract(sale, contracts)) if sale > 0 else 0.0
     hold = p_yes if side == "yes" else 1 - p_yes
     net_sale = sale - fee
+    reason = f"sale nets {net_sale * 100:.0f}c vs {hold * 100:.0f}c expected from holding"
+    ev = exit_evidence(side, minutes_left)
     if net_sale - hold > exit_margin:
-        return {"action": "EXIT NOW", "reason": f"sale nets {net_sale * 100:.0f}c vs {hold * 100:.0f}c expected from holding"}
-    return {"action": "HOLD TO SETTLE",
-            "reason": f"sale nets {net_sale * 100:.0f}c vs {hold * 100:.0f}c expected from holding"}
+        return {"action": "EXIT NOW", "reason": reason, "evidence": ev}
+    return {"action": "HOLD TO SETTLE", "reason": reason, "evidence": ev}

@@ -181,6 +181,10 @@ such, not slipped in quietly.
   entry cost in cents, the market mid's calibration in that price band and horizon (`MID_CALIBRATION`, frozen
   from pre-cutoff study rows, n and n_eff shown) and a "cheaper to wait" hint (`WAIT_TABLE`); thresholds are
   `DECISION_*` in config.py, numbers from `review/kalshi_entry_quality.py`. It never names a side.
+  `entry_timing()` adds ENTER NOW / WAIT / SKIP (`TIMING_TABLE`: WAIT only for a 5c+ book at the 10-min snapshot,
+  the one state where the cost fell >= 1c with >= 85% of books still open) and `decision_line()` renders the one
+  dashboard line; `decide_exit` carries `EXIT_EVIDENCE` (selling back lost 1.6-2.0c against holding in every state).
+  Numbers and provenance: DECISION_RULES.md, `review/kalshi_decision_rules.py`.
 - `edge_hunt.py` -- the sealed holdout for the edge hunt (EDGE_RESULTS.md): rows from `HOLDOUT_CUTOFF_DAY` on
   are off-limits to exploration; `load_exploration()` raises on them. Change the cutoff only by a labelled amendment.
 - `kalshi_study.py` -- the KXBTC15M edge study (REVIEW_FINDINGS.md, "Is

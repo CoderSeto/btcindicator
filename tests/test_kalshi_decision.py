@@ -205,3 +205,54 @@ def test_wait_hint_only_where_the_cache_showed_a_change():
     assert "narrower at 2 min in 71% of 791 markets" in h and "68% were still tradable" in h
     assert "median -3c" in h
     assert kd.wait_hint(0.02, 10.0) != ""                       # 2c exactly qualifies
+
+
+# --- entry timing, exit evidence, the one line (hand-worked) -------------------
+
+def test_entry_timing_waits_only_for_a_wide_book_at_the_ten_minute_snapshot():
+    wide = kd.entry_quality(0.45, 0.52, None, 10.0)                  # 7c spread, EXPENSIVE
+    t = kd.entry_timing(wide, 10.0)
+    assert t["timing"] == "WAIT"
+    assert "fell 1.9c [1.7, 2.2] by 5 min in 773 such markets, 88% still tradable" in t["reason"]
+    assert "~21c" in t["reason"]
+    t = kd.entry_timing(wide, 5.0)                                     # 5 -> 2: only 66% still tradable
+    assert t["timing"] == "ENTER NOW" and "saved only 1.7c in 643 such markets and 34% of books had closed" in t["reason"]
+    tight = kd.entry_quality(0.50, 0.51, None, 10.0)
+    t = kd.entry_timing(tight, 10.0)
+    assert t["timing"] == "ENTER NOW" and "saved only 0.4c in 17341 such markets and 1% of books" in t["reason"]
+    mid = kd.entry_quality(0.48, 0.51, None, 10.0)                   # 3c spread: saves 0.75c, under the 1c bar
+    assert kd.entry_timing(mid, 10.0)["timing"] == "ENTER NOW"
+
+
+def test_entry_timing_never_waits_at_the_extremes_or_the_last_snapshot_and_skips_avoid():
+    ext = kd.entry_quality(0.90, 0.96, None, 10.0)                   # 6c spread but mid 93c
+    t = kd.entry_timing(ext, 10.0)
+    assert t["timing"] == "ENTER NOW" and "did not fall by 5 min (+0.1c) and 10% of books had closed" in t["reason"]
+    assert "30% of books" in kd.entry_timing(ext, 5.0)["reason"]
+    last = kd.entry_timing(kd.entry_quality(0.45, 0.52, None, 2.0), 2.0)
+    assert last["timing"] == "ENTER NOW" and "nothing later" in last["reason"]
+    skip = kd.entry_timing(kd.entry_quality(0.40, 0.52, None, 10.0), 10.0)
+    assert skip["timing"] == "SKIP" and "spread 12c" in skip["reason"]
+    assert kd.entry_timing(kd.entry_quality(None, 0.5, None, 10.0), 10.0) == {"timing": "SKIP", "reason": "no tradable two-sided book"}
+    between = kd.entry_timing(kd.entry_quality(0.45, 0.52, None, 7.5), 7.5)   # uses the 10-min state, says so
+    assert between["timing"] == "WAIT" and between["reason"].startswith("between snapshots")
+
+
+def test_exit_carries_the_measured_sell_back_loss():
+    ev = kd.exit_evidence("yes", 8.0)
+    assert "lost 1.6c [1.2, 1.9] per contract against holding (n=18567, n_eff=18166)" in ev
+    assert "lost 2.0c [1.6, 2.4]" in kd.exit_evidence("no", 4.0)
+    r = kd.decide_exit("yes", 0.55, 0.50, 0.52, 4.0)
+    assert r["action"] == "HOLD TO SETTLE" and r["evidence"] == kd.exit_evidence("yes", 4.0)
+    assert kd.decide_exit("yes", 0.55, None, 0.52, 4.0)["evidence"] == ""
+
+
+def test_decision_line_is_one_markdown_line_with_action_timing_grade_and_cost():
+    d = kd.decide_action(None, 0.55, 0.45, 0.52, 10.0)
+    q = kd.entry_quality(0.45, 0.52, None, 10.0)
+    t = kd.entry_timing(q, 10.0)
+    line = kd.decision_line(d, q, t)
+    assert line == "\u26AA **NO TRADE** \u00b7 **WAIT** \u00b7 entry \U0001F7E1 **EXPENSIVE** (5.5\u00a2 to enter)"
+    assert "\n" not in line
+    held = kd.decision_line(d, q, t, {"action": "HOLD TO SETTLE"})
+    assert held.endswith(" \u00b7 held: **HOLD TO SETTLE**")

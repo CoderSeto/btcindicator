@@ -540,20 +540,12 @@ with left:
             if stale_price_warning:
                 st.caption(_esc(stale_price_warning))
             if decision is not None:
-                icon = {"BUY YES": "\U0001F7E2", "BUY NO": "\U0001F534", "NO TRADE": "\u26AA"}[decision["action"]]
-                head = f"{icon} **{decision['action']}**"
-                if decision["price"] is not None:
-                    head += f" @ {decision['price'] * 100:.0f}\u00a2 (+{decision['fee'] * 100:.0f}\u00a2 fee)"
-                if decision_exit is not None:
-                    head += f" \u00b7 held: **{decision_exit['action']}**"
-                if entry_grade is not None:
-                    grade_icon = {"GOOD": "\U0001F7E2", "EXPENSIVE": "\U0001F7E1", "AVOID": "\U0001F534"}[entry_grade["grade"]]
-                    head += f" \u00b7 entry: {grade_icon} **{entry_grade['grade']}**"
-                    if entry_grade["cost_c"] is not None:
-                        head += f" ({entry_grade['cost_c']:.1f}\u00a2 to enter)"
-                st.markdown(_esc(head))
+                timing = kalshi_decision.entry_timing(entry_grade, kalshi_result["minutes_remaining"])
+                st.markdown(_esc(kalshi_decision.decision_line(decision, entry_grade, timing, decision_exit)))
                 st.caption(_esc(" ".join(decision["reasons"] + ([decision["flip"] + "."] if decision["flip"] else []))
-                                + (" " + decision_exit["reason"] + "." if decision_exit is not None else "")))
+                                + f" Timing: {timing['reason']}."
+                                + (" " + decision_exit["reason"] + ". " + decision_exit.get("evidence", "")
+                                   if decision_exit is not None else "")))
                 if entry_grade is not None:
                     bits = []
                     if entry_grade["cost"] is not None:
@@ -563,7 +555,6 @@ with left:
                                     f"NO {c['breakeven_no'] * 100:.1f}%.")
                     bits += [r[0].upper() + r[1:] + "." for r in entry_grade["reasons"]]
                     bits.append(kalshi_decision.calibration_line(entry_grade["calibration"]))
-                    bits.append(entry_grade["wait"])
                     st.caption(_esc(" ".join(b for b in bits if b)))
                 st.caption(_esc(decision["evidence"] + " " + decision["caveat"]))
             elif kalshi_quote is not None:
