@@ -14,11 +14,10 @@ Paired within a market: cost at this snapshot vs the next. The mid moved ~17-29c
 | 10->5, spread 5c+ | 773 | 87.5% | -1.91 [-2.17,-1.66] | 6.32 | **WAIT** (saving >= 1c, >= 85% open) |
 | 10->5, mid <=10c / >=90c | 835 / 862 | 90% / 89% | +0.11 / +0.09, CI > 0 | 1.5 | ENTER NOW (never cheaper) |
 | 5->2, spread <2c / 2-5c / 5c+ | 17887 / 3749 / 643 | 84% / 80% / 66% | -0.25 / -0.64 / -1.72 | 1.8 / 2.9 / 6.3 | ENTER NOW (too many books close) |
-| 5->2, mid <=10c / >=90c | 4820 / 4853 | 70% / 69% | +0.03 / +0.04 | 1.4 | ENTER NOW |
+| 5->2, mid <=10c / >=90c | 4820 / 4853 | 70% / 69% | +0.03 / +0.04 | 1.4 | ENTER NOW (vol quartiles: same picture, -0.5c at 10->5) |
 | 2 min | | | no later snapshot | | ENTER NOW |
 | any, spread >= 10c or one-sided | 787 | | cost 8.3c, mid uninformative | | SKIP |
 
-Vol regime did not change the timing picture (cost change -0.5c in all three quartiles at 10->5).
 
 ## 2. Exit -> HOLD TO SETTLE (`decide_exit`, evidence in `EXIT_EVIDENCE`)
 
