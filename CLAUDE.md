@@ -243,8 +243,13 @@ such, not slipped in quietly.
   the depth and flow aggregators, liquidations, and `settlement_probability`
   with its raw inputs and a model-version tag; blanks and an `*_up` flag per
   source, a `gap` row when the loop stalls, Kalshi prints to a second log,
-  everything via `csv_utils.append_row`. Standalone, key-free, not wired into
-  the dashboard or alerts. The evaluator transcribes the pre-registered doc:
+  everything via `csv_utils.append_row`. Key-free. It also runs INSIDE the dashboard
+  (`edge_recorder.start_background`, one daemon thread per process via `app._get_recorder`, BTC-USD only, config
+  `EDGE_RECORD_IN_DASHBOARD`): it reads the dashboard's shared Kalshi poll (`live_market`, so no second orderbook
+  request; the quote's own age is what is recorded), the shared ticker and the running feeds, writes the same
+  `edge_record.csv`, and renames the file aside past `EDGE_RECORD_MAX_MB` (`csv_utils.rotate_if_larger`, kept as
+  `.bak`, never deleted). It records only while the dashboard process runs, so coverage depends on uptime; a
+  stopped dashboard shows as a `gap` row. Never wired into alerts. The evaluator transcribes the pre-registered doc:
   five hold-to-settlement hypotheses, one entry per market, taker fills,
   per-order fee, day-block intervals, Bonferroni over 5, and refuses rows
   stamped before the pre-registration. Changing a constant in either the doc

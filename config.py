@@ -327,6 +327,8 @@ DECISION_BACKTEST_PATH = "decision_backtest.json"
 # ---------------------------------------------------------------------------
 EDGE_RECORD_PATH = "edge_record.csv"          # one row per tick (and one per gap)
 EDGE_TRADES_PATH = "edge_trades.csv"          # Kalshi prints, one row each, deduplicated by trade_id
+EDGE_RECORD_IN_DASHBOARD = True               # the dashboard records edge_record.csv in the background while it runs (BTC-USD)
+EDGE_RECORD_MAX_MB = 500                      # past this size the file is renamed aside (.bak, never deleted)
 EDGE_TICK_SECONDS = 1.0                       # tick interval; Kalshi book is polled every tick
 EDGE_MARKET_REFRESH_SECONDS = 30.0            # how often the open-market list is re-fetched
 EDGE_TRADES_REFRESH_SECONDS = 5.0             # how often Kalshi prints are polled

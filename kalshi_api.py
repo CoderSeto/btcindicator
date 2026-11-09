@@ -278,9 +278,11 @@ class QuotePoller:
             return out
         out["minutes_remaining"] = max(0.0, (out["close_time"] - wall).total_seconds() / 60.0)
         if self.quote is None:
-            out.update(yes_bid=None, yes_ask=None, quote_age_seconds=None, quote_source=None)
+            out.update(yes_bid=None, yes_ask=None, yes_bid_size=None, yes_ask_size=None,
+                       quote_age_seconds=None, quote_source=None)
         else:
             out.update(yes_bid=self.quote["yes_bid"], yes_ask=self.quote["yes_ask"],
+                       yes_bid_size=self.quote.get("yes_bid_size"), yes_ask_size=self.quote.get("yes_ask_size"),
                        quote_age_seconds=max(0.0, self.clock() - self.quote_at), quote_source="orderbook")
         return out
 

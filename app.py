@@ -18,6 +18,7 @@ from streamlit_autorefresh import st_autorefresh
 import backtest
 import config as shared_config
 import dashboard_ui as ui
+import edge_recorder
 import exchange_feeds
 import kalshi
 import kalshi_api
@@ -95,7 +96,31 @@ feed_snapshot = feed_handle.snapshot() if feed_handle else None
 book_handle = _get_book_handle(product_id, cfg.ENABLE_BOOK_FEEDS)
 book_snapshot = book_handle.snapshot() if book_handle else None
 
+@st.cache_resource(show_spinner=False)
+def _get_recorder(enabled: bool, path: str):
+    """
+    The background recorder (edge_recorder.start_background), once per process, on BTC-USD (the
+    KXBTC15M underlying) and only while the dashboard is on BTC-USD, so the feeds it reads are the
+    BTC ones. It shares this dashboard's Kalshi poll, ticker and feeds; see edge_recorder.
+    """
+    if not enabled:
+        return None
+    rec_cfg = SimpleNamespace(**vars(cfg))
+    rec_cfg.PRODUCT_ID = "BTC-USD"
+    return edge_recorder.start_background(
+        rec_cfg, fetch_quote=lambda: kalshi_api.live_market(rec_cfg),
+        fetch_spot=lambda: ui.shared_latest_price("BTC-USD", rec_cfg.STRIP_REFRESH_SECONDS / 2),
+        book_snapshot=book_handle.snapshot if book_handle else None,
+        trade_snapshot=feed_handle.snapshot if feed_handle else None)
+
+
+recorder = _get_recorder(bool(cfg.EDGE_RECORD_IN_DASHBOARD) and product_id == "BTC-USD", cfg.EDGE_RECORD_PATH)
+
 # --- Sidebar: backtest controls ---
+st.sidebar.divider()
+if recorder is not None:
+    st.sidebar.caption(f"\u23FA Recording to {cfg.EDGE_RECORD_PATH} while this dashboard runs "
+                       f"({recorder[0].rows_written:,} rows this session, {recorder[0].gaps_written} gaps).")
 st.sidebar.divider()
 st.sidebar.subheader("Backtest confidence")
 cached_results = backtest.load_results(cfg)

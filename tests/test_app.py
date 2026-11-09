@@ -117,6 +117,8 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "PAPER_TRADE_LOG_PATH", str(tmp_path / "paper.csv"))
     monkeypatch.setattr(cfg, "DECISION_BACKTEST_PATH", str(tmp_path / "decision.json"))
     monkeypatch.setattr(cfg, "PAPER_AUTO_ENABLED", False)     # scenarios opt in; the shipped default is pinned below
+    monkeypatch.setattr(cfg, "EDGE_RECORD_IN_DASHBOARD", False)   # no background thread unless a test asks for one
+    monkeypatch.setattr(cfg, "EDGE_RECORD_PATH", str(tmp_path / "edge_record.csv"))
     e.tmp = tmp_path
 
     def get_candles(product_id, *a, **k):
@@ -1258,3 +1260,47 @@ def test_scalp_auto_exit_sells_when_the_target_is_reached(env, monkeypatch):
     no_exception(at)
     assert [r["event"] for r in paper_rows()] == ["open", "sell"]
     assert float(paper_rows()[1]["pnl"]) > 0
+
+
+# ---------- background recorder ----------
+
+def _stub_recorder(monkeypatch):
+    import threading
+    import edge_recorder
+    calls = []
+
+    def start(rec_cfg, fetch_quote, fetch_spot, book_snapshot=None, trade_snapshot=None, **kw):
+        calls.append({"pair": rec_cfg.PRODUCT_ID, "quote": fetch_quote(), "spot": fetch_spot()})
+        return SimpleNamespace(rows_written=7, gaps_written=1), threading.Event(), None
+    monkeypatch.setattr(edge_recorder, "start_background", start)
+    return calls
+
+
+def test_the_dashboard_starts_one_recorder_on_btc_and_says_so(env, monkeypatch):
+    monkeypatch.setattr(cfg, "EDGE_RECORD_IN_DASHBOARD", True)
+    env.ticker = {"price": "75712.34", "time": "2026-11-07T18:07:30Z"}
+    calls = _stub_recorder(monkeypatch)
+    at = run()
+    no_exception(at)
+    at.run()
+    assert len(calls) == 1 and calls[0]["pair"] == "BTC-USD"                  # cached: reruns don't start another
+    assert calls[0]["quote"]["ticker"] == OPEN_MARKET["ticker"] and calls[0]["spot"]["price"] == 75712.34
+    assert any("Recording to" in c.value and "7 rows" in c.value for c in at.sidebar.caption)
+
+
+def test_no_recorder_is_started_off_btc_or_when_switched_off(env, monkeypatch):
+    calls = _stub_recorder(monkeypatch)
+    at = run()                                                                  # config says off
+    no_exception(at)
+    assert not calls and not [c for c in at.sidebar.caption if "Recording to" in c.value]
+    monkeypatch.setattr(cfg, "EDGE_RECORD_IN_DASHBOARD", True)
+    at = run()
+    at.sidebar.selectbox[0].select("ETH-USD").run()                             # the recorder is BTC-only
+    no_exception(at)
+    assert [c["pair"] for c in calls] == ["BTC-USD"] or not calls
+
+
+def test_shipped_default_records_in_the_dashboard():
+    import re as _re
+    text = (ROOT / "config.py").read_text(encoding="utf-8")
+    assert _re.search(r"^EDGE_RECORD_IN_DASHBOARD = True\b", text, _re.M)

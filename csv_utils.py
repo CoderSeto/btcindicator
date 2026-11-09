@@ -134,6 +134,22 @@ def append_row(path: str, header: list, row: list, skip_if=None,
         return False
 
 
+def rotate_if_larger(path: str, max_bytes: int, lock_timeout: float = LOCK_TIMEOUT_SECONDS) -> bool:
+    """
+    Renames `path` to `<path>.<timestamp>.bak` when it has grown past `max_bytes`, under the same
+    lock append_row takes, so no writer is mid-append. The next append starts a fresh file with its
+    header (needs_header). The old file is kept, never deleted. Returns True if it rotated.
+    """
+    try:
+        with file_lock(path, timeout=lock_timeout):
+            if os.path.isfile(path) and os.path.getsize(path) > max_bytes:
+                os.replace(path, f"{path}.{time.strftime('%Y%m%d-%H%M%S')}.bak")
+                return True
+    except (LockTimeout, OSError) as e:
+        print(f"[log] couldn't rotate {path}: {e}")
+    return False
+
+
 def needs_header(path: str, header: list) -> bool:
     """
     Returns True if `header` still has to be written to `path`. Call it under

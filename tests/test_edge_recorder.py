@@ -368,3 +368,97 @@ def test_capture_writes_fixture_files(monkeypatch, tmp_path):
     names = sorted(p.name for p in out)
     assert names == ["kalshi_orderbook.json", "kalshi_orderbook_capture.txt", "kalshi_trades.json"]
     assert json.loads((tmp_path / "kalshi_orderbook.json").read_text(encoding="utf-8"))["t"] == "KXBTC15M-X"
+
+
+# --- dashboard mode: the shared quote, the size cap, the background thread ---------------------
+
+def _shared(f, **over):
+    """What kalshi_api.live_market() returns: market record plus the shared poll's top of book and its age."""
+    def fetch():
+        return {**f.market, "yes_bid": 0.55, "yes_ask": 0.57, "yes_bid_size": 12.0, "yes_ask_size": 3.0,
+                "quote_age_seconds": 0.4, "poll_error": None, "poll_interval": 0.5, **over}
+    return fetch
+
+
+def _shared_recorder(f, cfg, fetch_quote, **kw):
+    return Recorder(cfg, fetch_quote, None, lambda t, m: {"trades": []}, f.fetch_spot, f.fetch_candles,
+                    clock=f.clock, log=lambda *_: None, fetch_quote=fetch_quote, **kw)
+
+
+def test_shared_quote_mode_records_the_dashboards_quote_and_sends_no_orderbook_request(tmp_path):
+    cfg = Cfg(tmp_path)
+    f = Fakes(T0.timestamp())
+    rec = _shared_recorder(f, cfg, _shared(f))
+    rec.tick(T0.timestamp())
+    (r,) = _rows(cfg.EDGE_RECORD_PATH)
+    assert list(r.keys()) == RECORD_FIELDS and r["k_up"] == "1"
+    assert (float(r["k_yes_bid"]), float(r["k_yes_ask"])) == (0.55, 0.57)
+    assert (float(r["k_yes_bid_sz"]), float(r["k_yes_ask_sz"])) == (12.0, 3.0)
+    assert float(r["k_quote_age_s"]) == pytest.approx(0.4, abs=1e-3)       # the poll's own age, not "now"
+    assert r["k_rtt_ms"] == "" and f.calls["book"] == 0
+
+
+def test_shared_quote_mode_marks_the_feed_down_on_a_poll_error_but_keeps_the_last_good_quote(tmp_path):
+    cfg = Cfg(tmp_path)
+    f = Fakes(T0.timestamp())
+    state = {"err": None}
+    rec = _shared_recorder(f, cfg, lambda: _shared(f, poll_error=state["err"])())
+    rec.tick(T0.timestamp())
+    state["err"] = "429 Too Many Requests"
+    rec.tick(T0.timestamp() + 1.0)
+    a, b = _rows(cfg.EDGE_RECORD_PATH)
+    assert a["k_up"] == "1" and b["k_up"] == "0"
+    assert float(b["k_yes_bid"]) == 0.55 and float(b["k_quote_age_s"]) == pytest.approx(1.4, abs=1e-3)   # aging
+
+
+def test_shared_quote_mode_ignores_another_markets_quote_and_an_unpolled_one(tmp_path):
+    f = Fakes(T0.timestamp())
+    for name, over in (("other", {"ticker": "OTHER"}), ("unpolled", {"quote_age_seconds": None})):
+        d = tmp_path / name
+        d.mkdir()
+        cfg = Cfg(d)
+        rec = _shared_recorder(f, cfg, _shared(f, **over) if name == "unpolled" else lambda: _shared(f)())
+        if name == "other":
+            rec.tick(T0.timestamp())                                  # adopt the market from a good first read
+            rec.fetch_quote = _shared(f, **over)
+            rec.tick(T0.timestamp() + 1.0)
+            r = _rows(cfg.EDGE_RECORD_PATH)[1]
+            assert r["k_up"] == "0" and float(r["k_yes_bid"]) == 0.55  # last good quote, flagged down
+        else:
+            rec.tick(T0.timestamp())
+            (r,) = _rows(cfg.EDGE_RECORD_PATH)
+            assert r["k_up"] == "0" and r["k_yes_bid"] == ""
+
+
+def test_the_record_file_is_renamed_aside_past_the_size_cap_and_restarts_with_a_header(tmp_path):
+    cfg = Cfg(tmp_path)
+    cfg.EDGE_RECORD_MAX_MB = 0.0001                                  # 100 bytes
+    f = Fakes(T0.timestamp())
+    rec = _shared_recorder(f, cfg, _shared(f))
+    for i in range(edge_recorder.ROTATE_CHECK_ROWS):
+        rec.tick(T0.timestamp() + i)
+    baks = list(tmp_path.glob("edge_record.csv.*.bak"))
+    assert len(baks) == 1 and baks[0].stat().st_size > 100
+    rec.tick(T0.timestamp() + 10_000)
+    rows = _rows(cfg.EDGE_RECORD_PATH)                                # a fresh file: a gap row, then the new tick
+    assert list(rows[0].keys()) == RECORD_FIELDS and [r["row_kind"] for r in rows] == ["gap", "tick"]
+
+
+def test_start_background_records_on_a_thread_and_stops(tmp_path):
+    import time as _time
+    cfg = Cfg(tmp_path)
+    cfg.EDGE_TICK_SECONDS = 0.01
+    f = Fakes(T0.timestamp())
+    f.market = _market(close=datetime.now(timezone.utc) + timedelta(minutes=5))
+    rec, stop, thread = edge_recorder.start_background(
+        cfg, fetch_quote=_shared(f), fetch_spot=f.fetch_spot, clock=_time.time, log=lambda *_: None)
+    try:
+        deadline = _time.time() + 5
+        while rec.rows_written < 3 and _time.time() < deadline:
+            _time.sleep(0.02)
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+    assert rec.rows_written >= 3 and not thread.is_alive() and thread.daemon
+    rows = _rows(cfg.EDGE_RECORD_PATH)
+    assert all(r["row_kind"] in ("tick", "gap") for r in rows) and rows[0]["k_up"] == "1"

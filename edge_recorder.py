@@ -34,7 +34,8 @@ against what actually traded; EDGE_HYPOTHESES.md says why that is not enough.
 `--capture` saves verbatim Kalshi payloads to tests/fixtures/ and exits. The
 orderbook and trades parsers are untrusted until those files exist.
 
-Standalone and key-free. Not wired into the dashboard or the console bot.
+Key-free. Runs standalone (`python edge_recorder.py`) or inside the dashboard (`start_background`, sharing its quote poll,
+ticker and feeds; config EDGE_RECORD_IN_DASHBOARD). Not wired into the alerts or the console bot.
 """
 import argparse
 import json
@@ -68,6 +69,7 @@ RECORD_FIELDS = [
 TRADE_FIELDS = ["ts_utc", "ticker", "trade_id", "created_time", "yes_price", "count", "taker_side"]
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / "tests" / "fixtures"
+ROTATE_CHECK_ROWS = 600            # check the file size about every ten minutes of ticks
 
 
 def _iso(ts: float) -> str:
@@ -105,7 +107,7 @@ class Recorder:
     """
 
     def __init__(self, cfg, fetch_market, fetch_orderbook, fetch_trades, fetch_spot, fetch_candles,
-                 book_snapshot=None, trade_snapshot=None, clock=time.time, log=print):
+                 book_snapshot=None, trade_snapshot=None, clock=time.time, log=print, fetch_quote=None):
         self.cfg = cfg
         self.fetch_market = fetch_market
         self.fetch_orderbook = fetch_orderbook
@@ -116,6 +118,10 @@ class Recorder:
         self.trade_snapshot = trade_snapshot or (lambda: None)
         self.clock = clock
         self.log = log
+        # Dashboard mode: a callable returning kalshi_api.live_market()'s dict (market + the shared poll's
+        # top of book and its age). The recorder then reads the quote the dashboard already polls instead
+        # of sending its own orderbook request.
+        self.fetch_quote = fetch_quote
         self.market = None
         self._market_checked = None
         self._quote = None            # last good parsed book
@@ -155,6 +161,8 @@ class Recorder:
         """Returns (quote_or_None, rtt_ms_or_None, up)."""
         if not self.market:
             return None, None, False
+        if self.fetch_quote is not None:
+            return self._shared_quote(now)
         t0 = self.clock()
         try:
             payload = self.fetch_orderbook(self.market["ticker"])
@@ -170,8 +178,25 @@ class Recorder:
         self._quote, self._quote_ts = quote, now
         return quote, rtt_ms, True
 
+    def _shared_quote(self, now):
+        """(quote, None, up) from the dashboard's shared Kalshi poll; the quote's own age is what is recorded."""
+        try:
+            m = self.fetch_quote()
+        except Exception as e:
+            self.log(f"[edge] shared quote failed: {e}")
+            return self._quote, None, False
+        if (not m or not m.get("available") or m.get("ticker") != self.market["ticker"]
+                or m.get("poll_error") or m.get("quote_age_seconds") is None):
+            return self._quote, None, False
+        quote = {"yes_bid": m.get("yes_bid"), "yes_ask": m.get("yes_ask"),
+                 "yes_bid_size": m.get("yes_bid_size"), "yes_ask_size": m.get("yes_ask_size")}
+        if quote["yes_bid"] is None and quote["yes_ask"] is None:
+            return quote, None, True
+        self._quote, self._quote_ts = quote, now - float(m["quote_age_seconds"])
+        return quote, None, True
+
     def _poll_trades(self, now):
-        if not self.market:
+        if not self.market or self.fetch_trades is None:
             return
         if self._trades_checked is not None and now - self._trades_checked < self.cfg.EDGE_TRADES_REFRESH_SECONDS:
             return
@@ -314,6 +339,10 @@ class Recorder:
         row = self.build_row(now)
         if csv_utils.append_row(self.cfg.EDGE_RECORD_PATH, RECORD_FIELDS, [row[k] for k in RECORD_FIELDS]):
             self.rows_written += 1
+        if self.rows_written % ROTATE_CHECK_ROWS == 0:
+            max_mb = getattr(self.cfg, "EDGE_RECORD_MAX_MB", None)
+            if max_mb and csv_utils.rotate_if_larger(self.cfg.EDGE_RECORD_PATH, int(max_mb * 1_000_000)):
+                self.log(f"[edge] {self.cfg.EDGE_RECORD_PATH} passed {max_mb} MB: renamed aside, starting a new file")
         return row
 
 
@@ -349,6 +378,40 @@ def build_live(cfg, with_feeds: bool = True):
         trade_snapshot=trade_snapshot,
     )
     return rec, handles
+
+
+def start_background(cfg, fetch_quote, fetch_spot, book_snapshot=None, trade_snapshot=None, clock=time.time,
+                     log=print):
+    """
+    Records from inside the dashboard process, on a daemon thread, until the process ends. The Kalshi
+    quote, the ticker and the depth/flow snapshots all come from the dashboard's own shared sources
+    (no extra feeds, no second orderbook poll). Kalshi prints and the 1-minute vol window are still
+    fetched by the recorder itself, at their slow EDGE_* intervals. A tick that fails is logged and the
+    next one goes on; an unrecognised trades payload switches only the trades log off.
+    Returns (recorder, stop_event, thread).
+    """
+    rec = Recorder(cfg, fetch_market=fetch_quote, fetch_orderbook=None,
+                   fetch_trades=lambda ticker, min_ts: kalshi_api.get_trades(ticker, min_ts=min_ts),
+                   fetch_spot=fetch_spot, fetch_candles=_fetch_candles(cfg), book_snapshot=book_snapshot,
+                   trade_snapshot=trade_snapshot, clock=clock, log=log, fetch_quote=fetch_quote)
+    stop = threading.Event()
+
+    def loop():
+        log(f"[edge] recording to {cfg.EDGE_RECORD_PATH} every {cfg.EDGE_TICK_SECONDS}s while the dashboard runs")
+        while not stop.is_set():
+            started = time.time()
+            try:
+                rec.tick(started)
+            except kalshi_api.KalshiSchemaError as e:
+                log(f"[edge] Kalshi trades payload not recognised ({e}); trades log off, quotes continue")
+                rec.fetch_trades = None
+            except Exception as e:
+                log(f"[edge] tick failed: {e}")
+            stop.wait(max(0.0, cfg.EDGE_TICK_SECONDS - (time.time() - started)))
+
+    thread = threading.Thread(target=loop, name="edge-recorder", daemon=True)
+    thread.start()
+    return rec, stop, thread
 
 
 def run(cfg, stop_event: threading.Event = None):

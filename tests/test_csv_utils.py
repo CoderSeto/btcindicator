@@ -226,3 +226,18 @@ def test_releasing_retries_a_briefly_refused_delete(tmp_path, monkeypatch):
         pass
     assert refused["n"] == 2
     assert not os.path.exists(path + ".lock")
+
+
+def test_rotate_if_larger_renames_a_big_file_aside_and_the_next_append_restarts_it(tmp_path):
+    path = str(tmp_path / "log.csv")
+    header = ["a", "b"]
+    for i in range(50):
+        csv_utils.append_row(path, header, [i, i])
+    size = os.path.getsize(path)
+    assert csv_utils.rotate_if_larger(path, size + 1) is False and os.path.exists(path)      # under the cap
+    assert csv_utils.rotate_if_larger(path, size - 1) is True and not os.path.exists(path)
+    (bak,) = list(tmp_path.glob("log.csv.*.bak"))
+    assert len(pd.read_csv(bak)) == 50
+    csv_utils.append_row(path, header, [1, 2])
+    assert len(pd.read_csv(path)) == 1 and list(pd.read_csv(path).columns) == header
+    assert csv_utils.rotate_if_larger(str(tmp_path / "missing.csv"), 1) is False
