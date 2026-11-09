@@ -7,9 +7,8 @@ Kalshi math, and the order-book aggregator all run for real; the live-feed
 scenario drives a genuine BookAggregator (on a fake clock) and TradeAggregator,
 so the snapshot dicts the page reads have the shapes the feeds really produce.
 
-app.py is a script, not a module, so its two pure helpers (_esc and
-_strike_path_liquidity) are lifted out of its source with `ast` and unit
-tested directly.
+The rendering lives in dashboard_ui.py, whose pure helpers (_esc and
+_strike_path_liquidity) are unit tested directly.
 """
 import ast
 import csv
@@ -29,6 +28,7 @@ from streamlit.testing.v1 import AppTest
 
 import backtest
 import config as cfg
+import dashboard_ui
 import data_fetch
 import divergence
 import exchange_feeds
@@ -136,11 +136,21 @@ def env(monkeypatch, tmp_path):
         e.kalshi_calls += 1
         return e.kalshi
     monkeypatch.setattr(kalshi_api, "current_btc15m_market", current)
-    # The page polls through kalshi_api.cached_btc15m_market: run it on the fixtures' clock, with a
-    # fresh cache, and with caching off so each run sees env.kalshi (the cache has its own tests).
+    # The page polls through the shared kalshi_api.QuotePoller: market record from the stub above,
+    # quote from a stubbed orderbook built from the same env.kalshi, on the fixtures' clock, with a
+    # fresh poller per test and no caching so each run sees env.kalshi (the poller has its own tests).
+
+    def get_orderbook(ticker, depth=10):
+        k = e.kalshi
+        return {"orderbook_fp": {
+            "yes_dollars": [[f"{k['yes_bid']:.4f}", "10"]] if k.get("yes_bid") is not None else [],
+            "no_dollars": [[f"{1 - k['yes_ask']:.4f}", "10"]] if k.get("yes_ask") is not None else []}}
+    monkeypatch.setattr(kalshi_api, "get_orderbook", get_orderbook)
     monkeypatch.setattr(kalshi_api, "_now", lambda: NOW)
-    monkeypatch.setattr(kalshi_api, "_poll_cache", {"at": None, "result": None})
-    monkeypatch.setattr(cfg, "KALSHI_POLL_SECONDS", 0)
+    monkeypatch.setattr(kalshi_api, "_poller", None)
+    monkeypatch.setattr(cfg, "KALSHI_POLL_MIN_SECONDS", 0)
+    monkeypatch.setattr(cfg, "KALSHI_MARKET_REFRESH_SECONDS", 0)
+    monkeypatch.setattr(dashboard_ui, "_price_cache", {})
     monkeypatch.setattr(paper_trading, "utcnow", lambda: NOW)
     monkeypatch.setattr(paper_trading, "_last_settle_attempt", {})
 
@@ -188,16 +198,10 @@ def no_exception(at):
     assert not at.exception, [e.value for e in at.exception]
 
 
-# ---------- the pure helpers, lifted from app.py ----------
+# ---------- the pure helpers (dashboard_ui) ----------
 
 def _load_helpers():
-    tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
-    wanted = {"_esc", "_strike_path_liquidity"}
-    funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
-    assert {f.name for f in funcs} == wanted
-    ns = {"orderbook": orderbook}
-    exec(compile(ast.Module(body=funcs, type_ignores=[]), "app.py", "exec"), ns)
-    return ns["_esc"], ns["_strike_path_liquidity"]
+    return dashboard_ui._esc, dashboard_ui._strike_path_liquidity
 
 
 esc, strike_path = _load_helpers()
@@ -327,10 +331,10 @@ def test_kalshi_auto_track_fills_strike_and_countdown_and_shows_model_vs_market(
 
     want = kalshi.fair_value(env.df, 75_743.66, 7.5, cfg.KALSHI_VOL_LOOKBACK_MINUTES)
     assert metric(at, "P(YES)").value == f"{want['p_yes'] * 100:.1f}%"
-    assert metric(at, "P(NO)").value == f"{want['p_no'] * 100:.1f}%"
-    assert metric(at, "Kalshi P(YES)").value == f"{want['p_yes'] * 100:.1f}%"      # header strip agrees
-    assert metric(at, "Kalshi P(YES)").delta.endswith("pts vs market")
-    assert re.fullmatch(r"\d+¢", metric(at, "Market YES").value)
+    assert metric(at, "P(YES)").value == f"{want['p_yes'] * 100:.1f}%"      # header strip agrees
+    assert metric(at, "P(YES)").delta.endswith("pts vs market")
+    assert re.fullmatch(r"\d+¢ / \d+¢", metric(at, "Kalshi YES").value)
+    assert metric(at, "Kalshi YES").delta.endswith("s old")
     assert OPEN_MARKET["ticker"] in all_text(at)
 
 
@@ -373,7 +377,7 @@ def test_kalshi_p_yes_is_not_blended_with_the_bot_signals(env):
     quiet = metric(at, "P(YES)").value
     slider(at, "Alert threshold").set_value(1).run()
     assert metric(at, "P(YES)").value == quiet
-    assert metric(at, "Kalshi P(YES)").value == quiet
+    assert metric(at, "P(YES)").value == quiet
 
 
 def test_manual_strike_survives_refreshes_within_the_same_window(env):
@@ -404,7 +408,7 @@ def test_unchecking_auto_track_stops_polling_kalshi_and_keeps_manual_values(env)
     assert env.kalshi_calls == calls_after_first                           # no further requests
     assert at.number_input(key="kalshi_strike").value == 75_600.0
     assert metric(at, "Ann. vol").value.endswith("%")                      # no market quote -> vol shown instead
-    assert metric(at, "Kalshi P(YES)").delta.endswith("min left")
+    assert metric(at, "P(YES)").delta.endswith("min left")
 
 
 def test_kalshi_unavailable_still_gives_a_model_value_from_manual_inputs(env):
@@ -764,9 +768,8 @@ def test_a_bad_strike_from_kalshi_shows_the_reason_instead_of_a_certain_p_yes(en
     at = run()
     no_exception(at)
     assert at.number_input(key="kalshi_strike").value == pytest.approx(7.243729)
-    assert metric(at, "Kalshi P(YES)").value == "--"
-    assert metric(at, "Kalshi P(YES)").delta.startswith("Strike 100.0% from spot")
-    assert not [m for m in at.metric if m.label == "P(YES)"]
+    assert metric(at, "P(YES)").value == "--"
+    assert metric(at, "P(YES)").delta.startswith("Strike 100.0% from spot")
     warning = " ".join(w.value for w in at.warning)
     assert "likely bad" in warning and "divided by 10,000" in warning
     assert not re.search(r"(?<!\\)\$", warning)                        # money escaped
@@ -778,18 +781,16 @@ def test_the_model_vs_market_gap_carries_the_studys_answer_wherever_it_is_shown(
     # contracts, so the "pts vs market" gap must not read as an edge.
     at = run()
     no_exception(at)
-    assert metric(at, "Kalshi P(YES)").delta.endswith("pts vs market")
-    assert "not a trading signal" in metric(at, "Kalshi P(YES)").help
+    assert metric(at, "P(YES)").delta.endswith("pts vs market")
+    assert "not a trading signal" in metric(at, "P(YES)").help
     captions = [c.value for c in at.caption if "not a trading signal" in c.value]
     assert captions, "no caveat next to the Market YES gap"
     assert all("scored worse than Kalshi's own mid on held-out data" in c and "Is there an edge?" in c
                for c in captions)
     notes = all_text(at)
     assert "it can reflect a real mispricing" not in notes                 # the old framing is gone
-    # With no market quote there is no gap, and no caveat about one.
-    at.checkbox(key="kalshi_auto_track").uncheck().run()
-    assert not [c for c in at.caption if "not a trading signal" in c.value]
-    assert "not a trading signal" not in (metric(at, "Kalshi P(YES)").help or "")
+    # Shown once on the page (Notes), not repeated in every box that shows a number.
+    assert len(captions) == 1
 
 
 def test_readme_answers_the_edge_question_next_to_the_gap():
@@ -903,7 +904,8 @@ def test_header_and_kalshi_use_the_live_price_while_signals_wait_for_the_candle_
 
 
 def test_reruns_share_one_kalshi_poll_within_the_poll_interval(env):
-    cfg.KALSHI_POLL_SECONDS = 10
+    cfg.KALSHI_POLL_MIN_SECONDS = 10
+    cfg.KALSHI_MARKET_REFRESH_SECONDS = 30
     at = run()
     at.run()
     at.sidebar.button[0].click().run()                                     # "Refresh now"
@@ -916,7 +918,8 @@ def test_the_page_uses_no_deprecated_streamlit_apis(env, caplog):
     # replaces it on st.button / st.dataframe / st.plotly_chart from Streamlit 1.51 on, which is
     # why requirements.txt pins streamlit>=1.51.
     import logging
-    assert "use_container_width" not in (ROOT / "app.py").read_text(encoding="utf-8")     # incl. feed-only panels
+    for f in ("app.py", "dashboard_ui.py"):                                # incl. feed-only panels
+        assert "use_container_width" not in (ROOT / f).read_text(encoding="utf-8")
     go_live(env)                                                           # render the feed tables too
     with caplog.at_level(logging.WARNING, logger="streamlit"):
         at = run()
@@ -958,7 +961,7 @@ def test_a_failed_ticker_falls_back_to_the_candle_and_warns_it_may_be_stale(env)
     no_exception(at)
     assert metric(at, "BTC-USD").value == f"${env.df['close'].iloc[-1]:,.2f}"
     stale = [c.value for c in at.caption if "not the ticker" in c.value]
-    assert len(stale) == 2                                                 # header and Kalshi block
+    assert len(stale) == 1                                                 # once, in the live strip
     assert all("ticker down" in c and "lag the last trade" in c for c in stale)
 
 
@@ -1147,3 +1150,47 @@ def test_decision_line_calls_a_wide_book_expensive(env):
     assert ("**WAIT**" in text) or ("**ENTER NOW**" in text)          # the timing word sits on the decision line
     assert "Timing:" in text and "such markets" in text
     assert "break-even YES 54.0%, NO 57.0%" in text        # ask 52 + 2c fee; 1 - bid 55 + 2c fee
+
+
+# ---------- the live strip (dashboard_ui.live_strip, an st.fragment) ----------
+
+def test_the_strip_leads_with_price_quote_p_yes_time_left_and_the_decision_line(env):
+    at = run()
+    no_exception(at)
+    labels = [m.label for m in at.metric]
+    assert labels[:4] == ["BTC-USD", "Kalshi YES", "P(YES)", "Time left"]     # decision-first, in order
+    assert metric(at, "Time left").value == "7:30"
+    line = [m.value for m in at.markdown if "NO TRADE" in m.value or "BUY " in m.value]
+    assert line and "entry" in line[0] and ("ENTER NOW" in line[0] or "WAIT" in line[0] or "SKIP" in line[0])
+    assert "NO TRADE is the default" in all_text(at)                         # the one-line caveat beside it
+    assert [m.label for m in at.metric].count("P(YES)") == 1                 # no duplicate P(YES)
+    for m in at.markdown:                                                     # markdown is escaped too
+        if not m.value.lstrip().startswith(("<style", "<div", "####")):
+            assert not re.search(r"(?<!\\)\$", m.value), m.value
+
+
+def test_a_stale_kalshi_quote_reads_stale_and_forces_no_trade(env):
+    _write_rule(env, margin=0.0, shrink=1.0)
+    cfg.KALSHI_MAX_QUOTE_AGE_SECONDS = -1.0                                   # every quote is "too old"
+    at = run()
+    no_exception(at)
+    assert "stale" in metric(at, "Kalshi YES").delta
+    text = all_text(at)
+    assert "not acting on a stale price" in text and "BUY YES" not in text and "BUY NO" not in text
+
+
+def test_the_strip_runs_as_a_fragment_on_its_own_interval():
+    src = (ROOT / "app.py").read_text(encoding="utf-8")
+    assert "st.fragment(ui.live_strip, run_every=cfg.STRIP_REFRESH_SECONDS)" in src
+    assert "shared_config." not in src.split("cfg = SimpleNamespace", 1)[1]   # never writes the shared module
+
+
+def test_the_strip_shares_one_ticker_read_per_interval_across_sessions(env, monkeypatch):
+    calls = []
+    monkeypatch.setattr(data_fetch, "latest_price", lambda p, c=None: calls.append(p) or {
+        "price": 1.0, "source": "ticker", "time": None, "reason": None})
+    dashboard_ui.shared_latest_price("BTC-USD", 60)
+    dashboard_ui.shared_latest_price("BTC-USD", 60)                          # a second tab, same second
+    assert calls == ["BTC-USD"]
+    dashboard_ui.shared_latest_price("BTC-USD", 0)
+    assert len(calls) == 2

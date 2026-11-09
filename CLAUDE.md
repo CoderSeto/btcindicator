@@ -116,11 +116,14 @@ such, not slipped in quietly.
   because the dashboard reruns on every tick, click and tab.
 - `dashboard_data.py` -- `load_state()`, the fetch+compute pipeline the
   dashboard calls once per refresh.
-- `app.py` -- the Streamlit dashboard. Works on a per-run copy of
-  config.py's settings (`cfg`), never the shared module -- see gotcha #14.
-  Layout is deliberately
-  front-loaded: Kalshi calculator and top metrics first, heavier
-  sections (chart, live feeds, alert log) collapsed in expanders.
+- `app.py` -- the Streamlit dashboard's orchestration (sidebar, feeds, `load_state`, logging). Works on
+  a per-run copy of config.py's settings (`cfg`), never the shared module -- see gotcha #14. Rendering
+  lives in `dashboard_ui.py`, every function taking `cfg` explicitly. Decision first: a live strip
+  (price, Kalshi quote and its age, P(YES), time left, the decision line and its caveat) runs as an
+  `st.fragment(run_every=STRIP_REFRESH_SECONDS)` and recomputes from the freshest ticker and quote;
+  composite/badges, the Kalshi inputs and the outlook follow on the page refresh (`POLL_INTERVAL`),
+  heavy panels in tabs, long explanations in Notes. The ticker is shared by every tab
+  (`dashboard_ui.shared_latest_price`, still `data_fetch.latest_price()` underneath).
 - `charts.py` -- Plotly figure builder.
 - `analyze_correlation.py` -- reads `signal_log.csv` (opt-in via
   `LOG_ALL_SIGNALS`) to measure how much `agg_delta` overlaps with the
@@ -136,7 +139,13 @@ such, not slipped in quietly.
 - `kalshi_api.py` -- public (no-auth) Kalshi market-data client.
   `SERIES_TICKER = "KXBTC15M"` -- **not** `KXBTCD`, which is a different,
   separate hourly series (easy to conflate; cross-checked multiple
-  sources before committing to this).
+  sources before committing to this). The dashboard's quote comes from `QuotePoller`
+  (`live_market(cfg)`): one poll per process, quote from `/markets/{ticker}/orderbook?depth=1`
+  because the market record's own yes_bid/yes_ask lags the book by tens of seconds (measured,
+  DASHBOARD_NOTES.md); adaptive interval `KALSHI_POLL_MIN/MAX_SECONDS`, doubling (or Retry-After) on
+  429 / 5xx / timeout with nothing sent until it passes, shrinking 20% after 30 straight successes;
+  every result carries `quote_age_seconds`, and `decide_action` says NO TRADE past
+  `KALSHI_MAX_QUOTE_AGE_SECONDS`. No rate-limit headers exist to read; none is assumed.
 - `kalshi_tracking.py` -- logs fair-value predictions (opt-in via
   `LOG_KALSHI_PREDICTIONS`) and checks them against real settled
   outcomes for calibration (bucketed hit-rate table + Brier score,
