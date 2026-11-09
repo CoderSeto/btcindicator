@@ -308,6 +308,12 @@ PAPER_AUTO_LAST_MINUTES = 2.0
 PAPER_AUTO_CONTRACTS = 1
 PAPER_AUTO_MODEL_MARGIN = 0.02
 
+# Scalp row (dashboard live strip): paper-buy a side, sell it back at the real bid before the close.
+# Target/stop are NET cents per contract after both fees; a round trip costs ~4-5c before any move.
+SCALP_TARGET_CENTS = 6
+SCALP_STOP_CENTS = 6
+SCALP_AUTO_EXIT = False      # starting value of the "auto-exit at target/stop" checkbox
+
 # Written by review/kalshi_decision_backtest.py: the rule kalshi_decision chose by
 # walk-forward on the cached study data, and its out-of-sample record. Missing or
 # empty means the dashboard's decision line says NO TRADE.

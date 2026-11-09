@@ -539,3 +539,92 @@ def test_decision_strategy_follows_the_selected_rule_and_never_trades_without_on
     for kw in ({"decision_rule": None}, {"decision_rule": rule, "minutes_left": None}):
         args = {"model_p_yes": 0.9, "yes_bid": 0.40, "yes_ask": 0.44, "minutes_left": 5.0, **kw}
         assert pt.decide("decision", **args)[0] is None
+
+
+# ---------- selling back (scalps) ----------
+# Fee table: ceil(7% * p * (1 - p)) per one-contract order, in cents -> 2c at 53c, 78c, 47c and 45c.
+
+def _buy(cfg, side="yes", n=1, **mk):
+    placed = pt.place_order(cfg, market(**{"yes_bid": 0.52, "yes_ask": 0.53, **mk}), side, n, now=NOW, source=pt.SCALP)
+    assert placed["ok"], placed
+    return placed["trade"]
+
+
+def test_sale_price_is_the_bid_for_yes_and_one_minus_the_ask_for_no():
+    assert pt.sale_price("yes", 0.52, 0.53) == pytest.approx(0.52)
+    assert pt.sale_price("no", 0.52, 0.53) == pytest.approx(0.47)
+    assert pt.sale_price("yes", None, 0.53) is None and pt.sale_price("no", 0.5, None) is None
+    assert pt.sale_price("yes", 0.0, 0.5) is None and pt.sale_price("no", 0.5, 0.0) is None
+
+
+def test_selling_a_yes_back_by_hand(tmp_path):
+    cfg = _cfg(tmp_path)
+    t = _buy(cfg)                                                   # YES at 53c + 2c fee = 55c in
+    out = pt.sell_order(cfg, t["trade_id"], market(yes_bid=0.78, yes_ask=0.79), now=NOW)
+    # sold at the 78c bid, 2c fee: proceeds .78 - .02 = .76; pnl .76 - .55 = +.21
+    assert out["ok"] and out["trade"]["sale_price"] == pytest.approx(0.78) and out["trade"]["net_pnl"] == pytest.approx(0.21)
+    (tr,) = pt.load_trades(cfg.PAPER_TRADE_LOG_PATH)
+    assert tr["status"] == "sold" and tr["pnl"] == pytest.approx(0.21) and tr["sale_fee"] == pytest.approx(0.02)
+    assert tr["payout"] == pytest.approx(0.78) and tr["outcome"] is None
+
+
+def test_selling_a_no_back_by_hand_is_at_one_minus_the_ask(tmp_path):
+    cfg = _cfg(tmp_path)
+    t = _buy(cfg, "no")                                             # NO at 1 - .52 = 48c + 2c fee = 50c in
+    out = pt.sell_order(cfg, t["trade_id"], market(yes_bid=0.40, yes_ask=0.42), now=NOW)
+    # YES ask .42 -> NO sells at .58, fee ceil(7% * .58 * .42 = 1.7c) = 2c: .58 - .02 - .50 = +.06
+    assert out["ok"] and out["trade"]["sale_price"] == pytest.approx(0.58) and out["trade"]["net_pnl"] == pytest.approx(0.06)
+
+
+def test_a_round_trip_at_an_unchanged_quote_loses_the_spread_and_both_fees(tmp_path):
+    cfg = _cfg(tmp_path)
+    t = _buy(cfg)
+    out = pt.sell_order(cfg, t["trade_id"], market(yes_bid=0.52, yes_ask=0.53), now=NOW)
+    assert out["trade"]["net_pnl"] == pytest.approx(0.52 - 0.02 - 0.55)       # -5c: 1c spread + 2c + 2c
+
+
+def test_a_sold_position_never_settles_and_cannot_be_sold_twice_or_after_settling(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    t = _buy(cfg)
+    assert pt.sell_order(cfg, t["trade_id"], market(yes_bid=0.60, yes_ask=0.61), now=NOW)["ok"]
+    again = pt.sell_order(cfg, t["trade_id"], market(yes_bid=0.60, yes_ask=0.61), now=NOW)
+    assert not again["ok"] and "isn't open" in again["reason"]
+    stub_results(monkeypatch, {"KXBTC15M-T1": "yes"})
+    assert pt.settle_due(cfg, now=CLOSE + timedelta(minutes=1)) == 0
+    assert [r["event"] for r in rows(cfg)] == ["open", "sell"]
+    t2 = _buy(cfg)
+    assert pt.settle_due(cfg, now=CLOSE + timedelta(minutes=1)) == 1
+    assert not pt.sell_order(cfg, t2["trade_id"], market(), now=CLOSE - timedelta(seconds=1))["ok"]
+
+
+def test_sell_refusals_write_nothing(tmp_path):
+    cfg = _cfg(tmp_path)
+    t = _buy(cfg)
+    before = rows(cfg)
+    for mk, now in ((market(available=False, reason="x"), NOW), (market(ticker="OTHER"), NOW),
+                    (market(yes_bid=None), NOW), (market(), CLOSE)):
+        assert not pt.sell_order(cfg, t["trade_id"], mk, now=now)["ok"]
+    assert not pt.sell_order(cfg, "nope", market(), now=NOW)["ok"]
+    assert rows(cfg) == before
+
+
+def test_scalp_summary_by_hand(tmp_path):
+    cfg = _cfg(tmp_path)
+    for bid in (0.78, 0.40):                                          # +21c and a loss
+        t = _buy(cfg)
+        pt.sell_order(cfg, t["trade_id"], market(yes_bid=bid, yes_ask=bid + 0.01), now=NOW + timedelta(seconds=90))
+    s = pt.summarize_scalps(pt.load_trades(cfg.PAPER_TRADE_LOG_PATH), min_sample=30)
+    loss = round(0.40 - 0.02 - 0.55, 4)                                # -0.17
+    assert s["n"] == 2 and s["wins"] == 1 and s["win_rate"] == 0.5
+    assert s["net_pnl"] == pytest.approx(0.21 + loss) and s["avg_pnl"] == pytest.approx((0.21 + loss) / 2)
+    assert s["fees"] == pytest.approx(4 * 0.02) and s["avg_hold_seconds"] == pytest.approx(90)
+    assert s["verdict"] == "small_sample"
+    assert pt.summarize_scalps([])["verdict"] == "none"
+
+
+def test_sold_trades_stay_out_of_the_settled_account(tmp_path):
+    cfg = _cfg(tmp_path)
+    t = _buy(cfg)
+    pt.sell_order(cfg, t["trade_id"], market(yes_bid=0.70, yes_ask=0.71), now=NOW)
+    s = pt.summarize(pt.load_trades(cfg.PAPER_TRADE_LOG_PATH))
+    assert s["n_settled"] == 0 and s["n_open"] == 0

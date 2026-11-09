@@ -63,6 +63,7 @@ LEDGER_HEADER = [
 SIDES = ("yes", "no")
 STRATEGIES = ("composite", "model", "decision")
 MANUAL = "manual"
+SCALP = "scalp"      # placed from the dashboard's scalp row; may be sold back before the close
 
 # A contract that has closed but isn't resolved yet (Kalshi settles a few
 # seconds to a few minutes after close) is re-checked at most this often.
@@ -137,14 +138,16 @@ def _read_events(path: str) -> list:
 
 
 def _settled_ids(path: str) -> set:
-    return {e["trade_id"] for e in _read_events(path) if e.get("event") == "settle"}
+    """Trades that have left the book, by settlement or by being sold back."""
+    return {e["trade_id"] for e in _read_events(path) if e.get("event") in ("settle", "sell")}
 
 
 def load_trades(path: str) -> list:
     """
     Every position, oldest first, as dicts: the "open" event's fields plus
-    `status` ("open" or "settled") and, once settled, `outcome`, `payout`,
-    `pnl` and `settled_at`. A settle row with no matching open row (a hand-
+    `status` ("open", "settled" or "sold") and, once settled, `outcome`, `payout`,
+    `pnl` and `settled_at`; a position sold back before the close carries
+    `sold_at`, `sale_price`, `sale_fee`, `payout` (proceeds) and `pnl` instead. A settle row with no matching open row (a hand-
     edited file) is ignored.
     """
     trades = {}
@@ -170,11 +173,15 @@ def load_trades(path: str) -> list:
                 "source": e.get("source") or MANUAL,
                 "status": "open",
                 "outcome": None, "payout": None, "pnl": None, "settled_at": None,
+                "sold_at": None, "sale_price": None, "sale_fee": None,
             }
             order.append(tid)
         elif e.get("event") == "settle" and tid in trades and trades[tid]["status"] == "open":
             trades[tid].update(status="settled", outcome=e["outcome"], payout=_num(e["payout"]),
                                pnl=_num(e["pnl"]), settled_at=e["timestamp"])
+        elif e.get("event") == "sell" and tid in trades and trades[tid]["status"] == "open":
+            trades[tid].update(status="sold", payout=_num(e["payout"]), pnl=_num(e["pnl"]), sold_at=e["timestamp"],
+                               sale_price=_num(e["price"]), sale_fee=_num(e["fee"]))
     return [trades[t] for t in order]
 
 
@@ -247,6 +254,60 @@ def place_order(cfg, market: dict, side: str, contracts: int, spot=None, model_p
         "price": price, "fee": fee, "cost": round(price * contracts + fee, 4),
         "strike": market["strike"], "close_time": market["close_time"], "source": source,
     }}
+
+
+def sale_price(side: str, yes_bid, yes_ask):
+    """
+    What a taker gets for selling ONE contract back: YES at the YES bid, NO at
+    1 - the YES ask (selling NO is buying YES at the ask). None when that side
+    has no quote or the price isn't strictly between $0 and $1.
+    """
+    if side == "yes":
+        price = yes_bid
+    elif side == "no":
+        price = None if yes_ask is None else 1.0 - yes_ask
+    else:
+        raise ValueError(f"side must be 'yes' or 'no', not {side!r}")
+    if price is None:
+        return None
+    price = round(float(price), 4)
+    return price if 0.0 < price < 1.0 else None
+
+
+def sell_order(cfg, trade_id: str, market: dict, now=None) -> dict:
+    """
+    Sells an open position back at the real bid (YES) / 1 - ask (NO) of `market`
+    (fetched just now), paying the taker fee again. Appends a "sell" event, so
+    the trade leaves the book at that price and never settles. Returns
+    {"ok": True, "trade": {...with "net_pnl"}} or {"ok": False, "reason": ...};
+    nothing is written on a refusal. The fee model is the one place
+    (order_fee); the exit is never at the mid.
+    """
+    now = now or utcnow()
+    path = cfg.PAPER_TRADE_LOG_PATH
+    trade = next((t for t in load_trades(path) if t["trade_id"] == trade_id), None)
+    if trade is None or trade["status"] != "open":
+        return {"ok": False, "reason": "That position isn't open (already sold or settled)."}
+    if not market.get("available") or market.get("ticker") != trade["ticker"]:
+        return {"ok": False, "reason": "No live quote for this position's contract."}
+    if market["close_time"] <= now:
+        return {"ok": False, "reason": "This contract has already closed; it will settle."}
+    price = sale_price(trade["side"], market.get("yes_bid"), market.get("yes_ask"))
+    if price is None:
+        return {"ok": False, "reason": f"No usable {trade['side'].upper()} bid right now "
+                                       f"(bid {market.get('yes_bid')}, ask {market.get('yes_ask')})."}
+    fee = order_fee(price, trade["contracts"])
+    proceeds = round(price * trade["contracts"], 4)
+    pnl = round(proceeds - fee - (trade["price"] * trade["contracts"] + trade["fee"]), 4)
+    row = {"event": "sell", "trade_id": trade_id, "timestamp": now.isoformat(), "ticker": trade["ticker"],
+           "side": trade["side"], "contracts": trade["contracts"], "price": price, "fee": fee,
+           "yes_bid": market.get("yes_bid"), "yes_ask": market.get("yes_ask"), "payout": proceeds, "pnl": pnl}
+    ok = append_row(path, LEDGER_HEADER, [row.get(c, "") if row.get(c) is not None else "" for c in LEDGER_HEADER],
+                    skip_if=lambda: trade_id in _settled_ids(path))
+    if not ok:
+        return {"ok": False, "reason": "Already closed (or the ledger couldn't be written; see the console)."}
+    return {"ok": True, "trade": {**trade, "sale_price": price, "sale_fee": fee, "payout": proceeds,
+                                  "net_pnl": pnl, "status": "sold"}}
 
 
 def settle_due(cfg, now=None, retry_seconds: float = SETTLE_RETRY_SECONDS) -> int:
@@ -435,6 +496,46 @@ def summarize_by_source(trades: list, min_sample: int = 30, noise_z: float = 2.0
     """{source: summarize(...)} -- "manual", "auto:composite", "auto:model" -- for the sources present."""
     sources = list(dict.fromkeys(t["source"] for t in trades))
     return {src: summarize([t for t in trades if t["source"] == src], min_sample, noise_z) for src in sources}
+
+
+def summarize_scalps(trades: list, min_sample: int = 30, noise_z: float = 2.0) -> dict:
+    """
+    The record of positions sold back before the close: count, net P&L, fees
+    (entry and exit), win rate, average P&L per trade with one standard error,
+    and average hold in seconds. `verdict` compares the average with zero:
+    "none", "small_sample" below `min_sample` sales, "within_noise" while the
+    average is inside `noise_z` standard errors, else "ahead"/"behind".
+    Scalps in one market overlap in time, so treat the standard error as
+    optimistic.
+    """
+    sold = [t for t in trades if t["status"] == "sold"]
+    out = {"n": len(sold), "net_pnl": 0.0, "fees": 0.0, "wins": 0, "win_rate": None, "avg_pnl": None,
+           "se": None, "avg_hold_seconds": None, "verdict": "none"}
+    if not sold:
+        return out
+    pnl = [t["pnl"] for t in sold]
+    out["net_pnl"] = round(sum(pnl), 4)
+    out["fees"] = round(sum(t["fee"] + (t["sale_fee"] or 0.0) for t in sold), 4)
+    out["wins"] = sum(1 for x in pnl if x > 0)
+    out["win_rate"] = out["wins"] / len(sold)
+    out["avg_pnl"] = out["net_pnl"] / len(sold)
+    holds = []
+    for t in sold:
+        a, b = parse_time(t["opened_at"]), parse_time(t["sold_at"])
+        if a and b:
+            holds.append((b - a).total_seconds())
+    out["avg_hold_seconds"] = sum(holds) / len(holds) if holds else None
+    if len(sold) > 1:
+        mean = out["avg_pnl"]
+        var = sum((x - mean) ** 2 for x in pnl) / (len(sold) - 1)
+        out["se"] = math.sqrt(var / len(sold))
+    if len(sold) < min_sample or out["se"] is None:
+        out["verdict"] = "small_sample"
+    elif abs(out["avg_pnl"]) < noise_z * max(out["se"], 1e-9):
+        out["verdict"] = "within_noise"
+    else:
+        out["verdict"] = "ahead" if out["avg_pnl"] > 0 else "behind"
+    return out
 
 
 VERDICT_TEXT = {

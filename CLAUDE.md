@@ -175,6 +175,17 @@ such, not slipped in quietly.
   edge (principle 1; the study found none). Once-per-market is enforced by
   `place_order(once_per_market=True)` through `append_row`'s locked `skip_if`,
   so two open tabs place one order; the order is re-decided on a fresh quote.
+- Scalping (paper): `paper_trading.sell_order()` appends a `sell` event (same ledger, same header) that sells a
+  position back at the real bid (YES) / 1 - ask (NO), paying `order_fee` again; `load_trades()` then reports
+  status "sold" with `sale_price`, `sale_fee`, `payout`, `pnl`, and a sold trade never settles (`_settled_ids`
+  covers `settle` and `sell`, so two tabs can't close one trade twice). `summarize_scalps()` is the sold-back
+  record (own function: never pool it with the held-to-settlement account). `scalp.py` holds the pure helpers:
+  `position_view` (net P&L if sold now, break-even sale cents), `exit_signal` (net cents per contract vs
+  target/stop), `needed_btc_move` (dollars of BTC that move the settlement model's P(YES) by N cents: a ruler,
+  never a forecast). The dashboard's scalp row (`dashboard_ui.render_scalp`, inside the live strip fragment)
+  places `source="scalp"` paper orders, shows live net P&L per open position, and offers Sell-now and an
+  optional auto-exit at target/stop (`SCALP_*` in config.py); both buttons are disabled on a stale quote. The
+  scalp study found a round trip costs 4-5c and no entry rule beat it, so nothing here predicts direction.
 - `kalshi_decision.py` -- the dashboard's BUY YES / BUY NO / NO TRADE line (and HOLD TO SETTLE / EXIT NOW for a
   held paper position). One vectorized core (`rule_side`) serves both the live `decide_action()` and the
   walk-forward backtest, so what is backtested is what runs. A `Rule` = margin, `shrink` (p_hat = mid +

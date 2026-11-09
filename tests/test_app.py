@@ -1188,9 +1188,9 @@ def test_the_strip_leads_with_price_quote_p_yes_time_left_and_the_decision_line(
             assert not re.search(r"(?<!\\)\$", m.value), m.value
 
 
-def test_a_stale_kalshi_quote_reads_stale_and_forces_no_trade(env):
+def test_a_stale_kalshi_quote_reads_stale_and_forces_no_trade(env, monkeypatch):
     _write_rule(env, margin=0.0, shrink=1.0)
-    cfg.KALSHI_MAX_QUOTE_AGE_SECONDS = -1.0                                   # every quote is "too old"
+    monkeypatch.setattr(cfg, "KALSHI_MAX_QUOTE_AGE_SECONDS", -1.0)            # every quote is "too old"
     at = run()
     no_exception(at)
     assert "stale" in metric(at, "Kalshi YES").delta
@@ -1213,3 +1213,48 @@ def test_the_strip_shares_one_ticker_read_per_interval_across_sessions(env, monk
     assert calls == ["BTC-USD"]
     dashboard_ui.shared_latest_price("BTC-USD", 0)
     assert len(calls) == 2
+
+
+# ---------- scalp row ----------
+
+def test_scalp_row_buys_then_sells_back_at_the_real_bid_and_shows_it_in_the_ledger(env, monkeypatch):
+    monkeypatch.setattr(cfg, "PAPER_AUTO_ENABLED", False)
+    at = run()
+    no_exception(at)
+    at.button(key="scalp_buy_yes").click().run()
+    no_exception(at)
+    (row,) = paper_rows()
+    assert (row["event"], row["source"], row["side"]) == ("open", "scalp", "yes")
+    assert float(row["price"]) == pytest.approx(float(OPEN_MARKET["yes_ask_dollars"]))
+    text = all_text(at)
+    assert "break-even sale" in text and "round trip" in text.lower() or "break-even sale" in text
+    at.button(key=f"scalp_sell_{row['trade_id']}").click().run()
+    no_exception(at)
+    events = paper_rows()
+    assert [r["event"] for r in events] == ["open", "sell"]
+    assert float(events[1]["price"]) == pytest.approx(float(OPEN_MARKET["yes_bid_dollars"]))     # the bid, never the mid
+    assert float(events[1]["pnl"]) < 0                                                         # spread + two fees
+    at.run()                                                                                  # the next strip refresh
+    assert not [b for b in at.button if b.key and b.key.startswith("scalp_sell_")]             # gone from the strip
+
+
+def test_scalp_buttons_are_disabled_on_a_stale_quote(env, monkeypatch):
+    at = run()
+    no_exception(at)
+    assert at.button(key="scalp_buy_yes").disabled is False
+    monkeypatch.setattr(cfg, "KALSHI_MAX_QUOTE_AGE_SECONDS", -1.0)
+    at = run()
+    no_exception(at)
+    assert at.button(key="scalp_buy_yes").disabled is True and at.button(key="scalp_buy_no").disabled is True
+
+
+def test_scalp_auto_exit_sells_when_the_target_is_reached(env, monkeypatch):
+    monkeypatch.setattr(cfg, "PAPER_AUTO_ENABLED", False)
+    at = run()
+    at.button(key="scalp_buy_yes").click().run()
+    assert len(paper_rows()) == 1
+    env.kalshi = kalshi_live(yes_bid_dollars="0.80", yes_ask_dollars="0.81")           # YES jumps ~36c
+    at.checkbox(key="scalp_auto_exit").check().run()
+    no_exception(at)
+    assert [r["event"] for r in paper_rows()] == ["open", "sell"]
+    assert float(paper_rows()[1]["pnl"]) > 0

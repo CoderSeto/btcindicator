@@ -26,6 +26,7 @@ import kalshi_api
 import kalshi_decision
 import orderbook
 import paper_trading
+import scalp
 import weighting
 from charts import build_figure
 
@@ -289,7 +290,92 @@ def live_strip(cfg, ctx: dict):
         st.error("No price available.")
         return
     k = kalshi_api.live_market(cfg) if ctx["auto_track"] else None
-    render_strip(cfg, live_view(cfg, ctx, k, price), ctx["product_id"])
+    view = live_view(cfg, ctx, k, price)
+    render_strip(cfg, view, ctx["product_id"])
+    render_scalp(cfg, ctx, view)
+
+
+def render_scalp(cfg, ctx: dict, view: dict):
+    """
+    The scalp row: paper-buy a side at the real ask / 1 - bid, watch what selling it back
+    now would net (real bid, fee again), and sell. Orders and sales go through
+    paper_trading on a fresh read of the shared quote; a stale quote disables both.
+    """
+    k, res = view["kalshi"], view["result"]
+    if not (k and k.get("available") and k.get("yes_bid") is not None and k.get("yes_ask") is not None):
+        return
+    stale = view["stale"]
+    yes_p = paper_trading.fill_price("yes", k["yes_bid"], k["yes_ask"])
+    no_p = paper_trading.fill_price("no", k["yes_bid"], k["yes_ask"])
+    c1, c2, c3, c4, c5 = st.columns([0.7, 1, 1, 0.8, 0.8])
+    with c1:
+        n = st.number_input("Contracts", min_value=1, step=1, value=1, key="scalp_contracts",
+                            label_visibility="collapsed", help="Contracts per scalp order (paper).")
+    with c2:
+        buy_yes = st.button(f"Scalp: buy YES @ {yes_p * 100:.0f}¢" if yes_p else "Buy YES (no quote)",
+                            key="scalp_buy_yes", disabled=yes_p is None or stale, width="stretch")
+    with c3:
+        buy_no = st.button(f"Scalp: buy NO @ {no_p * 100:.0f}¢" if no_p else "Buy NO (no quote)",
+                           key="scalp_buy_no", disabled=no_p is None or stale, width="stretch")
+    with c4:
+        target = st.number_input("Target ¢", min_value=1.0, step=1.0, value=float(cfg.SCALP_TARGET_CENTS),
+                                 key="scalp_target", help="Net cents per contract after both fees.")
+    with c5:
+        stop = st.number_input("Stop ¢", min_value=1.0, step=1.0, value=float(cfg.SCALP_STOP_CENTS),
+                               key="scalp_stop", help="Net cents lost per contract after both fees.")
+    auto_exit = st.checkbox("Auto-exit at target/stop (paper)", value=cfg.SCALP_AUTO_EXIT, key="scalp_auto_exit",
+                            help="Sells a position back at the live bid the moment its net P&L reaches the "
+                                 "target or the stop. Only while this page is open.")
+    if buy_yes or buy_no:
+        fresh = kalshi_api.live_market(cfg, force=True)
+        model_p = res["p_yes"] if res["available"] and fresh.get("available") and res["strike"] == fresh.get("strike") else None
+        placed = paper_trading.place_order(cfg, fresh, "yes" if buy_yes else "no", int(n), spot=view["price"]["price"],
+                                           model_p_yes=model_p, source=paper_trading.SCALP)
+        if placed["ok"]:
+            t = placed["trade"]
+            st.success(_esc(f"Bought {t['contracts']} {t['side'].upper()} at {t['price'] * 100:.0f}¢ + "
+                            f"${t['fee']:.2f} fee. It breaks even if sold at {scalp.breakeven_sale_cents(t)}¢ or more."))
+        else:
+            st.error(_esc(placed["reason"]))
+    held = [t for t in paper_trading.load_trades(cfg.PAPER_TRADE_LOG_PATH)
+            if t["status"] == "open" and t["ticker"] == k["ticker"]]
+    for t in held:
+        pv = scalp.position_view(t, k["yes_bid"], k["yes_ask"])
+        sig = scalp.exit_signal(t, pv, target, stop)
+        if auto_exit and sig and not stale:
+            sold = paper_trading.sell_order(cfg, t["trade_id"], kalshi_api.live_market(cfg, force=True))
+            if sold["ok"]:
+                st.success(_esc(f"Auto-exit ({sig.lower()}): sold {t['contracts']} {t['side'].upper()} at "
+                                f"{sold['trade']['sale_price'] * 100:.0f}¢, net ${sold['trade']['net_pnl']:+.2f}."))
+                continue
+        if pv["net_pnl"] is None:
+            st.caption(_esc(f"{t['side'].upper()} x{t['contracts']} bought at {t['price'] * 100:.0f}¢: no bid to sell into."))
+            continue
+        move = None
+        if res["available"]:
+            move = scalp.needed_btc_move(res["current_price"], res["strike"], res["minutes_remaining"],
+                                         res["annual_vol"], t["side"], pv["needed_c"] or 0.0) if pv["needed_c"] else 0.0
+        bits = [f"{t['side'].upper()} x{t['contracts']} bought {t['price'] * 100:.0f}¢",
+                f"sale now {pv['sale_price'] * 100:.0f}¢ → net ${pv['net_pnl']:+.2f}",
+                f"break-even sale {pv['breakeven_c']}¢"]
+        if move:
+            bits.append(f"needs BTC {'+' if t['side'] == 'yes' else '-'}${move:,.0f} (model ruler, not a forecast)")
+        if sig:
+            bits.append(f"**{sig} HIT**")
+        d1, d2 = st.columns([4, 1])
+        with d1:
+            st.markdown(_esc(" · ".join(bits)))
+        with d2:
+            if st.button(f"Sell @ {pv['sale_price'] * 100:.0f}¢", key=f"scalp_sell_{t['trade_id']}",
+                         disabled=stale, width="stretch"):
+                sold = paper_trading.sell_order(cfg, t["trade_id"], kalshi_api.live_market(cfg, force=True))
+                if sold["ok"]:
+                    st.success(_esc(f"Sold at {sold['trade']['sale_price'] * 100:.0f}¢, net "
+                                    f"${sold['trade']['net_pnl']:+.2f} after both fees."))
+                else:
+                    st.error(_esc(sold["reason"]))
+    st.caption("Paper scalps pay the spread and the taker fee twice (~4-5¢ a round trip before any move). "
+               "Nothing here predicts direction; results are in the Paper trading tab.")
 
 
 # --- Second row: composite, book, alert, badges ------------------------------------
@@ -593,6 +679,14 @@ def render_paper_tab(cfg, kalshi_live, kalshi_result, snapshot, live_price):
              "break-even": f"{ss['breakeven_rate'] * 100:.1f}%" if ss["breakeven_rate"] is not None else "",
              "read": paper_trading.VERDICT_TEXT[ss["verdict"]]}
             for src, ss in by_source.items()]), width="stretch", hide_index=True)
+    scalps = paper_trading.summarize_scalps(paper_trades, cfg.PAPER_MIN_SAMPLE, cfg.PAPER_NOISE_Z)
+    if scalps["n"]:
+        st.caption(_esc(
+            f"Scalps sold back: {scalps['n']}, net ${scalps['net_pnl']:+,.2f} (fees ${scalps['fees']:,.2f}), "
+            f"win rate {scalps['win_rate'] * 100:.0f}%, average {scalps['avg_pnl'] * 100:+.1f}¢ per trade"
+            + (f" ±{scalps['se'] * 100:.1f}¢ (1 SE)" if scalps["se"] is not None else "")
+            + (f", held {scalps['avg_hold_seconds']:.0f}s on average" if scalps["avg_hold_seconds"] is not None else "")
+            + f". {paper_trading.VERDICT_TEXT.get(scalps['verdict'], '')}"))
     if paper_trades:
         now_utc = paper_trading.utcnow()
 
@@ -600,6 +694,8 @@ def render_paper_tab(cfg, kalshi_live, kalshi_result, snapshot, live_price):
             closes = paper_trading.parse_time(t["close_time"])
             if t["status"] == "settled":
                 state_text = "WON" if t["side"] == t["outcome"] else "LOST"
+            elif t["status"] == "sold":
+                state_text = f"SOLD @ {t['sale_price'] * 100:.0f}¢"
             else:
                 state_text = "awaiting result" if closes and closes <= now_utc else "open"
             return {"opened (UTC)": (paper_trading.parse_time(t["opened_at"]) or now_utc).strftime("%m-%d %H:%M:%S"),
