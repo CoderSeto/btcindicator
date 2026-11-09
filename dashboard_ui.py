@@ -252,6 +252,10 @@ def render_strip(cfg, view: dict, product_id: str):
     d = view["decision"]
     if d is not None:
         st.markdown(_esc(kalshi_decision.decision_line(d, view["grade"], view["timing"], view["exit"])))
+        k_ = view["kalshi"]
+        if res["available"] and k_.get("yes_bid") is not None and k_.get("yes_ask") is not None:
+            trig = kalshi_decision.trigger_prices(res["p_yes"], k_["yes_bid"], k_["yes_ask"])
+            st.caption(_esc(kalshi_decision.trigger_line(trig, res["p_yes"], k_["yes_bid"], k_["yes_ask"])))
         st.caption(_esc(d["caveat"]))
         with st.expander("Why", expanded=False):
             ex = view["exit"]

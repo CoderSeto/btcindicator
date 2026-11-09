@@ -449,6 +449,49 @@ def exit_evidence(side: str, minutes_left) -> str:
             f"per contract against holding (n={n}, n_eff={n_eff}), in every price band and whichever way the mid had moved.")
 
 
+def _max_price(win_prob: float, margin: float, contracts: int = 1):
+    """Highest price (whole cents) at which a side that wins with `win_prob` nets more than `margin` after the fee, or None."""
+    cents = np.arange(1, 100)
+    price = cents / 100.0
+    with np.errstate(invalid="ignore"):
+        ok = win_prob - price - ks.fee_per_contract(price, contracts) > margin + 1e-9   # a tie is not a profit (float residue)
+    return int(cents[ok].max()) if ok.any() else None
+
+
+def trigger_prices(p_model, yes_bid, yes_ask, margin: float = 0.0, contracts: int = 1) -> dict:
+    """
+    How far the market is from a trade the MODEL would call profitable: the
+    highest YES ask and the highest NO cost (1 - bid), in cents, at which the
+    model's probability still clears the fee plus `margin`. A distance, not a
+    signal -- the model has not been shown to beat the market (NO_EDGE_LINE).
+    `*_gap_c` is the current price minus that ceiling: positive = still too
+    expensive by that many cents, <= 0 = the model would already buy.
+    """
+    out = {"yes_max_c": None, "no_max_c": None, "yes_gap_c": None, "no_gap_c": None}
+    if p_model is None or yes_bid is None or yes_ask is None:
+        return out
+    out["yes_max_c"] = _max_price(p_model, margin, contracts)
+    out["no_max_c"] = _max_price(1.0 - p_model, margin, contracts)
+    if out["yes_max_c"] is not None:
+        out["yes_gap_c"] = yes_ask * 100 - out["yes_max_c"]
+    if out["no_max_c"] is not None:
+        out["no_gap_c"] = (1 - yes_bid) * 100 - out["no_max_c"]
+    return out
+
+
+def trigger_line(t: dict, p_model, yes_bid, yes_ask) -> str:
+    """One caption: the model's break-even prices next to today's, with the standing caveat."""
+    def side(name, mx, gap, now):
+        if mx is None:
+            return f"{name}: no price pays"
+        verdict = f"{gap:.0f}\u00a2 too high" if gap > 0.5 else "at or under"
+        return f"{name} up to {mx}\u00a2 (now {now * 100:.0f}\u00a2, {verdict})"
+    return (f"Model {p_model * 100:.0f}% breaks even after fees at: "
+            f"{side('YES', t['yes_max_c'], t['yes_gap_c'], yes_ask)} \u00b7 "
+            f"{side('NO', t['no_max_c'], t['no_gap_c'], 1 - yes_bid)}. "
+            f"A distance, not a signal: the model has not beaten the market.")
+
+
 def decision_line(decision: dict, quality: dict, timing: dict, held: dict = None) -> str:
     """The one dashboard line: action, timing, grade, cost. Markdown; the reasons go in the caption."""
     icon = {"BUY YES": "\U0001F7E2", "BUY NO": "\U0001F534", "NO TRADE": "\u26AA"}[decision["action"]]

@@ -116,6 +116,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "BACKTEST_RESULTS_PATH", str(tmp_path / "bt.json"))
     monkeypatch.setattr(cfg, "PAPER_TRADE_LOG_PATH", str(tmp_path / "paper.csv"))
     monkeypatch.setattr(cfg, "DECISION_BACKTEST_PATH", str(tmp_path / "decision.json"))
+    monkeypatch.setattr(cfg, "PAPER_AUTO_ENABLED", False)     # scenarios opt in; the shipped default is pinned below
     e.tmp = tmp_path
 
     def get_candles(product_id, *a, **k):
@@ -1074,6 +1075,24 @@ def test_auto_trade_is_off_unless_switched_on(env, monkeypatch):
     no_exception(at)
     assert at.checkbox(key="paper_auto").value is False
     assert not os.path.exists(cfg.PAPER_TRADE_LOG_PATH)
+
+
+def test_shipped_default_has_auto_trade_on():
+    import re as _re
+    text = (ROOT / "config.py").read_text(encoding="utf-8")
+    assert _re.search(r"^PAPER_AUTO_ENABLED = True\b", text, _re.M)
+
+
+def test_auto_trade_on_by_default_places_one_paper_trade_without_any_click(env, monkeypatch):
+    monkeypatch.setattr(cfg, "PAPER_AUTO_ENABLED", True)
+    monkeypatch.setattr(cfg, "PAPER_AUTO_ENTRY_MINUTES", 10.0)
+    at = run()
+    no_exception(at)
+    assert at.checkbox(key="paper_auto").value is True
+    (row,) = paper_rows()
+    assert row["source"] == "auto:composite"
+    at.run()
+    assert len(paper_rows()) == 1
 
 
 def test_auto_trade_follows_the_composite_once_per_market(env, monkeypatch):

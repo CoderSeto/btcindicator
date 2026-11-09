@@ -160,7 +160,7 @@ such, not slipped in quietly.
   append-only EVENT log (`open` / `settle` rows joined on `trade_id` by
   `load_trades()`), written only through `csv_utils.append_row`; settling uses
   its `skip_if` so two tabs can't settle one trade twice. Orders price on a
-  fresh `current_btc15m_market()`, not the 10s poll cache. `summarize()`
+  fresh read of the shared quote poll (`kalshi_api.live_market(cfg, force=True)`, the orderbook quote), never the market record's lagging bid/ask. `summarize()`
   reports the win rate against the break-even rate with its standard error
   (counting each market once) and flags small samples -- keep it that way.
   Not modelled, and the tab says so: size at the touch, latency.
@@ -194,6 +194,9 @@ such, not slipped in quietly.
   the one state where the cost fell >= 1c with >= 85% of books still open) and `decision_line()` renders the one
   dashboard line; `decide_exit` carries `EXIT_EVIDENCE` (selling back lost 1.6-2.0c against holding in every state).
   Numbers and provenance: DECISION_RULES.md, `review/kalshi_decision_rules.py`.
+  `trigger_prices()` / `trigger_line()` show the model's break-even YES ask and NO cost next to today's (a distance
+  from a trade, labelled as not a signal). `PAPER_AUTO_ENABLED` ships True (rule "composite"): it paper-trades only
+  while a dashboard page is open, and its record stays separate (`auto:composite`).
 - `edge_hunt.py` -- the sealed holdout for the edge hunt (EDGE_RESULTS.md): rows from `HOLDOUT_CUTOFF_DAY` on
   are off-limits to exploration; `load_exploration()` raises on them. Change the cutoff only by a labelled amendment.
 - `kalshi_study.py` -- the KXBTC15M edge study (REVIEW_FINDINGS.md, "Is

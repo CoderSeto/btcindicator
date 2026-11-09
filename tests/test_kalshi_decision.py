@@ -265,3 +265,32 @@ def test_a_stale_quote_forces_no_trade_whatever_the_rule():
     stale = kd.decide_action(rule, 0.90, 0.50, 0.52, 5.0, quote_age_seconds=5.1, max_quote_age_seconds=5.0)
     assert stale["action"] == "NO TRADE" and stale["reasons"] == [
         "Kalshi quote is 5s old (limit 5s): not acting on a stale price"]
+
+
+def test_trigger_prices_by_hand():
+    # p .60: YES at 56c pays .60 - .56 - fee(2c: ceil(7% * .56 * .44 = 1.7c)) = +.02 > 0; at 57c: .60-.57-.02 = +.01 > 0;
+    # at 58c: .60-.58-.02 = 0 (not > 0). So the ceiling is 57c.
+    t = kd.trigger_prices(0.60, 0.50, 0.60)
+    assert t["yes_max_c"] == 57 and t["yes_gap_c"] == pytest.approx(3.0)
+    # NO wins .40: NO at 37c: .40-.37-.02 = .01 > 0; at 38c: 0. Ceiling 37c; NO costs 1 - .50 = 50c now.
+    assert t["no_max_c"] == 37 and t["no_gap_c"] == pytest.approx(13.0)
+
+
+def test_trigger_prices_none_when_nothing_pays_or_no_inputs():
+    assert kd.trigger_prices(None, 0.5, 0.6) == {"yes_max_c": None, "no_max_c": None, "yes_gap_c": None, "no_gap_c": None}
+    t = kd.trigger_prices(0.01, 0.5, 0.6)
+    assert t["yes_max_c"] is None and t["yes_gap_c"] is None and t["no_max_c"] is not None
+
+
+def test_trigger_ceiling_agrees_with_the_decision_rule():
+    # at the ceiling the model rule (shrink 1, margin 0) buys; one cent above it does not
+    rule = kd.Rule(0.0, 1.0, (5,))
+    t = kd.trigger_prices(0.60, 0.50, 0.57)
+    assert kd.decide_action(rule, 0.60, 0.53, 0.57, 5.0)["action"] == "BUY YES" and t["yes_gap_c"] <= 0
+    assert kd.decide_action(rule, 0.60, 0.55, 0.59, 5.0)["action"] != "BUY YES"
+
+
+def test_trigger_line_states_the_distance_and_the_caveat():
+    t = kd.trigger_prices(0.60, 0.50, 0.60)
+    line = kd.trigger_line(t, 0.60, 0.50, 0.60)
+    assert "YES up to 57" in line and "3\u00a2 too high" in line and "not a signal" in line

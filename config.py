@@ -293,7 +293,7 @@ PAPER_NOISE_Z = 2.0
 # position per market if the rule says to trade. It runs from the dashboard, so
 # it only trades while a dashboard page is open (and refreshing). This is only
 # the checkbox's starting value; the Paper trading tab can switch it per session.
-PAPER_AUTO_ENABLED = False
+PAPER_AUTO_ENABLED = True
 # "composite": follow the bot's composite signal when it is strong enough to
 # alert (the sidebar's alert threshold): bullish -> YES, bearish -> NO.
 # "model": trade toward the Kalshi fair-value model when its edge over the
