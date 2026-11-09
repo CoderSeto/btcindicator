@@ -37,6 +37,7 @@ from dataclasses import asdict, dataclass
 import numpy as np
 import pandas as pd
 
+import config
 import kalshi_study as ks
 
 HORIZONS = ks.HORIZONS_MIN                  # (10, 5, 2): the snapshots the cache has
@@ -228,6 +229,143 @@ def oos_line(res) -> str:
     return (f"Walk-forward out of sample: {o['n']} trades, {o['mean'] * 100:+.2f}c each "
             f"[{lo * 100:+.2f}, {hi * 100:+.2f}] net of fees, traded in {o['folds_traded']}/{o['folds']} folds, "
             f"max drawdown ${o['max_drawdown']:.2f}/contract.")
+
+
+# --- entry quality -----------------------------------------------------------
+#
+# Measured on the PRE-CUTOFF study rows only (edge_hunt.load_exploration, 246 days to
+# 2026-08-17; review/kalshi_entry_quality.py prints every number below). None of it
+# claims a direction: it says what an entry costs and how the market's own mid has
+# been calibrated in the same state, with its n_eff and day-block 95% interval.
+
+# (mid band low, high, horizon) -> n, n_eff, outcome - mid in cents, CI low, CI high
+MID_CALIBRATION = {
+    (0.00, 0.10, 10): (835, 877, -1.31, -2.84, +0.21),
+    (0.00, 0.10, 5): (4820, 5061, -0.94, -1.45, -0.44),
+    (0.00, 0.10, 2): (6430, 6136, -0.54, -0.89, -0.20),
+    (0.10, 0.25, 10): (3490, 4336, -2.06, -3.15, -0.98),
+    (0.10, 0.25, 5): (3105, 3297, -0.25, -1.51, +1.01),
+    (0.10, 0.25, 2): (1478, 1515, -1.51, -3.29, +0.27),
+    (0.25, 0.75, 10): (14178, 15888, +0.27, -0.48, +1.01),
+    (0.25, 0.75, 5): (6542, 6645, -0.68, -1.83, +0.46),
+    (0.25, 0.75, 2): (2897, 3122, +0.06, -1.59, +1.71),
+    (0.75, 0.90, 10): (3321, 3505, +1.13, -0.09, +2.35),
+    (0.75, 0.90, 5): (2959, 2929, +1.08, -0.22, +2.37),
+    (0.75, 0.90, 2): (1455, 1399, +0.20, -1.73, +2.12),
+    (0.90, 1.00, 10): (862, 940, +1.46, +0.03, +2.89),
+    (0.90, 1.00, 5): (4853, 6541, +0.89, +0.44, +1.34),
+    (0.90, 1.00, 2): (6349, 6476, +0.21, -0.15, +0.57),
+}
+
+# (horizon now, spread band) -> markets, share still tradable at the next snapshot,
+# median spread change in cents, share narrower. Books under 2c did not change (median 0).
+WAIT_TABLE = {
+    (10, "2-5c"): (5508, 0.97, -1.0, 0.74),
+    (10, "5c+"): (967, 0.89, -3.0, 0.76),
+    (5, "2-5c"): (4656, 0.78, -1.0, 0.74),
+    (5, "5c+"): (791, 0.68, -3.0, 0.71),
+}
+
+
+def nearest_horizon(minutes_left, tolerance: float = TOLERANCE_MIN):
+    """The cached snapshot horizon within `tolerance` of the clock, else None."""
+    for hz in HORIZONS:
+        if abs(minutes_left - hz) <= tolerance:
+            return hz
+    return None
+
+
+def entry_cost(yes_bid, yes_ask, contracts: int = 1) -> dict:
+    """
+    What entering at the touch costs against a fair mid, per contract, as fractions:
+    half the spread plus the per-order fee for each side, plus each side's breakeven
+    probability (price paid + fee).
+    """
+    mid = (yes_bid + yes_ask) / 2
+    fee_yes = float(ks.fee_per_contract(yes_ask, contracts))
+    fee_no = float(ks.fee_per_contract(1 - yes_bid, contracts))
+    half = (yes_ask - yes_bid) / 2
+    return {"mid": mid, "half_spread": half, "fee_yes": fee_yes, "fee_no": fee_no,
+            "cost_yes": half + fee_yes, "cost_no": half + fee_no,
+            "breakeven_yes": yes_ask + fee_yes, "breakeven_no": (1 - yes_bid) + fee_no}
+
+
+def mid_calibration(mid, minutes_left):
+    """
+    How the market mid has been calibrated in this price band at this horizon:
+    {"n", "n_eff", "gap_c", "lo_c", "hi_c", "band", "horizon"} (gap = outcome - mid,
+    cents, day-block 95% CI), or None when the clock is outside every cached window.
+    """
+    hz = nearest_horizon(minutes_left)
+    if hz is None or mid is None or not (0 <= mid <= 1):
+        return None
+    for (lo, hi, h), (n, n_eff, gap, a, b) in MID_CALIBRATION.items():
+        if h == hz and (lo < mid <= hi or (lo == 0.0 and mid == 0.0)):
+            return {"n": n, "n_eff": n_eff, "gap_c": gap, "lo_c": a, "hi_c": b, "band": (lo, hi), "horizon": hz}
+    return None
+
+
+def wait_hint(spread, minutes_left, min_spread: float = None) -> str:
+    """
+    "Cheaper to wait?" -- only what the cache supports: books 2c and wider have usually
+    tightened by the next snapshot, at the price of some becoming untradable. Empty for
+    tight books (they did not change) and at the last snapshot (nothing later to wait for).
+    """
+    min_spread = config.DECISION_WAIT_MIN_SPREAD if min_spread is None else min_spread
+    hz = nearest_horizon(minutes_left)
+    if hz is None or hz == HORIZONS[-1] or spread < min_spread - 1e-9:
+        return ""
+    band = "5c+" if spread >= config.DECISION_SPREAD_EXPENSIVE - 1e-9 else "2-5c"
+    n, tradable, med, narrower = WAIT_TABLE[(hz, band)]
+    nxt = HORIZONS[HORIZONS.index(hz) + 1]
+    return (f"Waiting: books this wide were narrower at {nxt} min in {narrower:.0%} of {n} markets "
+            f"(median {med:+.0f}c), and {tradable:.0%} were still tradable then.")
+
+
+def entry_quality(yes_bid, yes_ask, last_price, minutes_left, contracts: int = 1) -> dict:
+    """
+    GOOD / EXPENSIVE / AVOID for entering this book now, with the measured reasons, the
+    cost in cents (average of the two sides' half-spread + fee), the market's calibration
+    in this state and a wait hint. Says nothing about which side.
+    """
+    out = {"grade": "AVOID", "cost_c": None, "reasons": [], "calibration": None, "wait": "", "cost": None}
+    if yes_bid is None or yes_ask is None or not ks.valid_book(yes_bid, yes_ask):
+        out["reasons"].append("no tradable two-sided book")
+        return out
+    c = entry_cost(yes_bid, yes_ask, contracts)
+    spread = yes_ask - yes_bid
+    out["cost"] = c
+    out["cost_c"] = 100 * (c["cost_yes"] + c["cost_no"]) / 2
+    grade = "GOOD"
+    if spread >= config.DECISION_SPREAD_AVOID - 1e-9:
+        grade = "AVOID"
+        out["reasons"].append(f"spread {spread * 100:.0f}c: entries this wide have cost ~8c and the mid says little")
+    elif spread >= config.DECISION_SPREAD_EXPENSIVE - 1e-9:
+        grade = "EXPENSIVE"
+        out["reasons"].append(f"spread {spread * 100:.0f}c: entries 5-10c wide have cost ~5c")
+    if last_price is not None and abs(last_price - c["mid"]) > config.DECISION_STALE_PRINT:
+        grade = "AVOID" if grade == "AVOID" else "EXPENSIVE"
+        out["reasons"].append(f"last print {last_price * 100:.0f}c is {abs(last_price - c['mid']) * 100:.0f}c "
+                              f"off the mid: stale or placeholder quote")
+    if c["mid"] <= config.DECISION_EXTREME_MID or c["mid"] >= 1 - config.DECISION_EXTREME_MID:
+        fav = "YES" if c["mid"] >= 0.5 else "NO"
+        px = yes_ask if fav == "YES" else 1 - yes_bid
+        fee = c["fee_yes"] if fav == "YES" else c["fee_no"]
+        out["reasons"].append(f"payout asymmetry: {fav} at {px * 100:.0f}c wins {(1 - px) * 100:.0f}c, "
+                              f"risks {px * 100:.0f}c + {fee * 100:.0f}c fee")
+    out["grade"] = grade
+    out["calibration"] = mid_calibration(c["mid"], minutes_left)
+    out["wait"] = wait_hint(spread, minutes_left)
+    return out
+
+
+def calibration_line(cal) -> str:
+    if cal is None:
+        return ""
+    lo, hi = cal["band"]
+    return (f"Market mid at {lo * 100:.0f}-{hi * 100:.0f}c, {cal['horizon']} min: outcomes ran "
+            f"{cal['gap_c']:+.2f}c vs the mid [{cal['lo_c']:+.2f}, {cal['hi_c']:+.2f}] "
+            f"(n={cal['n']}, n_eff={cal['n_eff']}).")
 
 
 def decide_action(rule, p_model, yes_bid, yes_ask, minutes_left, contracts: int = 1, result=None) -> dict:

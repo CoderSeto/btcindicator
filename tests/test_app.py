@@ -1127,3 +1127,20 @@ def test_a_manual_order_beside_an_auto_one_shows_each_rules_results(env, monkeyp
     assert [r["source"] for r in paper_rows()] == ["manual", "auto:composite"]
     sources = [df.value for df in at.dataframe if "placed by" in df.value.columns][0]
     assert sources["placed by"].tolist() == ["manual", "auto:composite"]
+
+
+def test_decision_line_grades_the_entry_and_shows_its_cost_and_the_market_calibration(env):
+    at = run()
+    no_exception(at)
+    text = all_text(at)
+    assert "entry:" in text and any(g in text for g in ("GOOD", "EXPENSIVE", "AVOID"))
+    assert "to enter" in text and "Entry cost (half-spread + fee)" in text and "break-even YES" in text
+
+
+def test_decision_line_calls_a_wide_book_expensive(env):
+    env.kalshi = kalshi_live(yes_bid_dollars="0.45", yes_ask_dollars="0.52")
+    at = run()
+    no_exception(at)
+    text = all_text(at)
+    assert "EXPENSIVE" in text and "Spread 7c: entries 5-10c wide have cost ~5c" in text
+    assert "break-even YES 54.0%, NO 57.0%" in text        # ask 52 + 2c fee; 1 - bid 55 + 2c fee

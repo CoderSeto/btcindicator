@@ -141,3 +141,67 @@ def test_save_and_load_roundtrip(tmp_path):
 def test_max_drawdown():
     assert kd.max_drawdown([1, -2, -1, 4, -3]) == 3
     assert kd.max_drawdown([]) == 0.0
+
+
+# --- entry quality (hand-worked) ---------------------------------------------
+
+def test_entry_cost_is_half_spread_plus_the_rounded_up_fee():
+    # bid 48 / ask 52: mid 50, half-spread 2c; fee at 52c = 0.07 * 0.52 * 0.48 = 1.7472c -> 2c per contract
+    c = kd.entry_cost(0.48, 0.52, 1)
+    assert c["mid"] == pytest.approx(0.50)
+    assert c["half_spread"] == pytest.approx(0.02)
+    assert c["fee_yes"] == pytest.approx(0.02) and c["fee_no"] == pytest.approx(0.02)
+    assert c["cost_yes"] == pytest.approx(0.04) and c["cost_no"] == pytest.approx(0.04)
+    assert c["breakeven_yes"] == pytest.approx(0.54) and c["breakeven_no"] == pytest.approx(0.54)
+    # 100 contracts at 52c: fee 174.72c -> 175c per order -> 1.75c each
+    assert kd.entry_cost(0.48, 0.52, 100)["fee_yes"] == pytest.approx(0.0175)
+
+
+def test_entry_quality_grades_by_measured_spread_and_stale_print():
+    good = kd.entry_quality(0.48, 0.52, 0.50, 10.0)
+    assert good["grade"] == "GOOD" and good["cost_c"] == pytest.approx(4.0) and good["reasons"] == []
+    exp = kd.entry_quality(0.45, 0.52, 0.50, 10.0)          # 7c spread
+    assert exp["grade"] == "EXPENSIVE" and "spread 7c" in exp["reasons"][0]
+    avoid = kd.entry_quality(0.40, 0.52, None, 10.0)        # 12c spread
+    assert avoid["grade"] == "AVOID" and "spread 12c" in avoid["reasons"][0]
+    stale = kd.entry_quality(0.48, 0.52, 0.60, 10.0)        # last 10c off the mid
+    assert stale["grade"] == "EXPENSIVE" and "stale or placeholder" in stale["reasons"][0]
+    assert kd.entry_quality(0.0, 1.0, None, 10.0)["grade"] == "AVOID"           # placeholder book
+    assert kd.entry_quality(None, 0.5, None, 10.0)["reasons"] == ["no tradable two-sided book"]
+    # 5c exactly is EXPENSIVE (>=), 4.9c is not; 10c exactly is AVOID
+    assert kd.entry_quality(0.47, 0.52, None, 10.0)["grade"] == "EXPENSIVE"
+    assert kd.entry_quality(0.42, 0.52, None, 10.0)["grade"] == "AVOID"
+
+
+def test_entry_quality_names_the_payout_asymmetry_at_the_extremes_without_a_side_call():
+    q = kd.entry_quality(0.94, 0.96, 0.95, 5.0)
+    assert q["grade"] == "GOOD"
+    assert q["reasons"] == ["payout asymmetry: YES at 96c wins 4c, risks 96c + 1c fee"]
+    q = kd.entry_quality(0.04, 0.06, None, 5.0)
+    assert q["reasons"] == ["payout asymmetry: NO at 96c wins 4c, risks 96c + 1c fee"]
+    assert kd.entry_quality(0.50, 0.52, None, 5.0)["reasons"] == []
+
+
+def test_mid_calibration_looks_up_the_frozen_band_and_horizon():
+    cal = kd.mid_calibration(0.95, 5.2)
+    assert (cal["n"], cal["n_eff"], cal["gap_c"], cal["lo_c"], cal["hi_c"]) == (4853, 6541, 0.89, 0.44, 1.34)
+    assert cal["band"] == (0.90, 1.00) and cal["horizon"] == 5
+    assert kd.mid_calibration(0.10, 10.0)["band"] == (0.0, 0.10)            # upper edge inclusive
+    assert kd.mid_calibration(0.101, 10.0)["band"] == (0.10, 0.25)
+    assert kd.mid_calibration(0.0, 2.0)["band"] == (0.0, 0.10)
+    assert kd.mid_calibration(0.5, 7.5) is None                               # between windows
+    line = kd.calibration_line(cal)
+    assert "90-100c, 5 min" in line and "+0.89c" in line and "n_eff=6541" in line
+    assert kd.calibration_line(None) == ""
+
+
+def test_wait_hint_only_where_the_cache_showed_a_change():
+    assert kd.wait_hint(0.01, 10.0) == ""                       # tight books did not change
+    assert kd.wait_hint(0.03, 2.0) == ""                        # nothing later to wait for
+    assert kd.wait_hint(0.03, 7.5) == ""                        # outside every window
+    h = kd.wait_hint(0.03, 10.0)
+    assert "narrower at 5 min in 74% of 5508 markets" in h and "97% were still tradable" in h
+    h = kd.wait_hint(0.06, 5.0)
+    assert "narrower at 2 min in 71% of 791 markets" in h and "68% were still tradable" in h
+    assert "median -3c" in h
+    assert kd.wait_hint(0.02, 10.0) != ""                       # 2c exactly qualifies

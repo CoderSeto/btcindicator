@@ -177,6 +177,12 @@ such, not slipped in quietly.
   data earlier studies already saw, not a pre-registered test; never present the action as proven edge.
   `paper_trading` has a matching "decision" auto rule (its own `source`). Live horizon windows are the
   backtested snapshots (10/5/2 min) +/- 1; outside them the line says so.
+  `entry_quality()` grades the book GOOD / EXPENSIVE / AVOID (spread, stale print, payout asymmetry) with the
+  entry cost in cents, the market mid's calibration in that price band and horizon (`MID_CALIBRATION`, frozen
+  from pre-cutoff study rows, n and n_eff shown) and a "cheaper to wait" hint (`WAIT_TABLE`); thresholds are
+  `DECISION_*` in config.py, numbers from `review/kalshi_entry_quality.py`. It never names a side.
+- `edge_hunt.py` -- the sealed holdout for the edge hunt (EDGE_RESULTS.md): rows from `HOLDOUT_CUTOFF_DAY` on
+  are off-limits to exploration; `load_exploration()` raises on them. Change the cutoff only by a labelled amendment.
 - `kalshi_study.py` -- the KXBTC15M edge study (REVIEW_FINDINGS.md, "Is
   there an edge?"): fetches and caches every settled market and its
   1-minute candlesticks, plus Coinbase 1-minute history, into

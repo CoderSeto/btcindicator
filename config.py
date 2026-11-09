@@ -317,3 +317,14 @@ EDGE_TRADES_REFRESH_SECONDS = 5.0             # how often Kalshi prints are poll
 EDGE_VOL_REFRESH_SECONDS = 60.0               # how often the Coinbase vol window is re-fetched
 EDGE_GAP_SECONDS = 5.0                        # a tick-to-tick interval longer than this logs a gap row
 EDGE_LIQ_WINDOW_SECONDS = 30.0                # liquidation notional summed over this trailing window
+
+# ---------------------------------------------------------------------------
+# Entry-quality grade on the dashboard's decision line (kalshi_decision.entry_quality).
+# Thresholds come from review/kalshi_entry_quality.py on the pre-cutoff study rows
+# (EDGE_RESULTS.md): entries cost ~1.9c in a <2c book, ~4.9c at 5-10c, ~8.3c above 10c.
+# ---------------------------------------------------------------------------
+DECISION_SPREAD_EXPENSIVE = 0.05    # ask - bid at or above this: EXPENSIVE
+DECISION_SPREAD_AVOID = 0.10        # ask - bid at or above this: AVOID (cost ~8c, mid uninformative)
+DECISION_STALE_PRINT = 0.05         # |last print - mid| above this: stale or placeholder quote
+DECISION_EXTREME_MID = 0.10         # mid within this of 0 or 1: payout asymmetry is called out
+DECISION_WAIT_MIN_SPREAD = 0.02     # a "cheaper to wait" hint only for books at least this wide

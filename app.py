@@ -363,10 +363,15 @@ if (kalshi_live and kalshi_live["available"]
 
 # The trade decision for the tracked market (kalshi_decision): fee-aware, defaults to NO TRADE,
 # and shows its own walk-forward record. Held positions get HOLD / EXIT from the same rule.
-decision = decision_exit = None
+decision = decision_exit = entry_grade = None
 decision_rule, decision_result = kalshi_decision.load_active(cfg.DECISION_BACKTEST_PATH)
 if (kalshi_result["available"] and kalshi_live and kalshi_live["available"]
         and kalshi_result["strike"] == kalshi_live["strike"]):
+    # Entry quality is independent of any rule: what this book costs to enter, how the
+    # market mid has been calibrated in this state, and whether waiting has paid. No direction.
+    entry_grade = kalshi_decision.entry_quality(
+        kalshi_live["yes_bid"], kalshi_live["yes_ask"], kalshi_live.get("last_price"),
+        kalshi_result["minutes_remaining"], 1)
     decision = kalshi_decision.decide_action(
         decision_rule, kalshi_result["p_yes"], kalshi_live["yes_bid"], kalshi_live["yes_ask"],
         kalshi_result["minutes_remaining"], 1, decision_result)
@@ -541,9 +546,25 @@ with left:
                     head += f" @ {decision['price'] * 100:.0f}\u00a2 (+{decision['fee'] * 100:.0f}\u00a2 fee)"
                 if decision_exit is not None:
                     head += f" \u00b7 held: **{decision_exit['action']}**"
+                if entry_grade is not None:
+                    grade_icon = {"GOOD": "\U0001F7E2", "EXPENSIVE": "\U0001F7E1", "AVOID": "\U0001F534"}[entry_grade["grade"]]
+                    head += f" \u00b7 entry: {grade_icon} **{entry_grade['grade']}**"
+                    if entry_grade["cost_c"] is not None:
+                        head += f" ({entry_grade['cost_c']:.1f}\u00a2 to enter)"
                 st.markdown(_esc(head))
                 st.caption(_esc(" ".join(decision["reasons"] + ([decision["flip"] + "."] if decision["flip"] else []))
                                 + (" " + decision_exit["reason"] + "." if decision_exit is not None else "")))
+                if entry_grade is not None:
+                    bits = []
+                    if entry_grade["cost"] is not None:
+                        c = entry_grade["cost"]
+                        bits.append(f"Entry cost (half-spread + fee): YES {c['cost_yes'] * 100:.1f}c, "
+                                    f"NO {c['cost_no'] * 100:.1f}c; break-even YES {c['breakeven_yes'] * 100:.1f}%, "
+                                    f"NO {c['breakeven_no'] * 100:.1f}%.")
+                    bits += [r[0].upper() + r[1:] + "." for r in entry_grade["reasons"]]
+                    bits.append(kalshi_decision.calibration_line(entry_grade["calibration"]))
+                    bits.append(entry_grade["wait"])
+                    st.caption(_esc(" ".join(b for b in bits if b)))
                 st.caption(_esc(decision["evidence"] + " " + decision["caveat"]))
             elif kalshi_quote is not None:
                 st.caption(_esc(MODEL_VS_MARKET_NOTE))
