@@ -820,7 +820,7 @@ was scored once.
 | `both_flow` | 0.13388 | 0.40955 | −0.40% [−0.70, −0.11] | −0.13% [−0.36, +0.10] | −0.039 / 0.912 |
 
 - **The effect of flow is zero to within ±0.2–0.4%.** All eight counterpart intervals (four models,
-  Brier and log loss) span zero; the point estimates run from −0.16% to +0.04%, seven of eight on
+  Brier and log loss) span zero; the point estimates run from −0.16% to +0.04%, six of eight on
   the wrong side. A flow effect of half a percent of the loss would have shown.
 - **It already failed on validation.** Every flow model had a higher validation log loss than its
   counterpart (e.g. 0.37063 vs 0.37001 on the mid), before the held-out set was touched.
