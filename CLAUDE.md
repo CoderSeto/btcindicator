@@ -186,6 +186,20 @@ such, not slipped in quietly.
   direction rule, not a strategy). `review/kalshi_scalp_backtest.py` runs it on
   the `study_data/` cache.
 
+- `kalshi_strategy_study.py` -- four further hypotheses, each as a rule and its
+  mirror (`residual`: the contract's move against the model's over 3 minutes;
+  `streak`: the last two settlements; `vol_regime`: 15-minute against 120-minute
+  realized vol; `basis`: the strike's distance from Coinbase at open): 20 cells
+  x 2 order sizes = 40 tests, held to settlement except the residual `sell`
+  cells. It owns no cost, split or statistics code: the fee, `valid_book`,
+  split, bootstrap and Bonferroni are `kalshi_study`'s, and the timed exit and
+  the selection rule are `kalshi_scalp_study`'s (`scalp_pnl`,
+  `select_and_test`). Same discipline: fixed design in the docstring, changed
+  only by a labelled, counted amendment. Every feature has a look-ahead test;
+  keep that for any new one. `review/kalshi_strategy_backtest.py` runs it
+  (`--fetch --kalshi-base-url` builds the cache from a sandbox that cannot
+  reach the default Kalshi host). Result in REVIEW_FINDINGS.md.
+
 ## Design principles (the "why" behind non-obvious choices)
 
 1. **Never blend independently-sourced probability/confidence numbers
@@ -471,7 +485,7 @@ and is what any new tests should match:
   wall large enough to hide itself under a mean.
 
 Also covered now: `kalshi.py`, `weighting.py`, `backtest.py`, `backtest_agg_delta.py`,
-`kalshi_tracking.py`, `paper_trading.py`, `kalshi_scalp_study.py`, `kalshi_api.py`, `indicators.py`, `divergence.py`,
+`kalshi_tracking.py`, `paper_trading.py`, `kalshi_scalp_study.py`, `kalshi_strategy_study.py`, `kalshi_api.py`, `indicators.py`, `divergence.py`,
 `outlook.py`, `dashboard_data.py`, `charts.py` and `app.py`. Writing them turned up three real bugs, all fixed:
 `compute_calibration` borrowed an older row's Kalshi quote (`groupby().first()`
 is per-column) and crashed when only some contracts had quotes, and
@@ -539,6 +553,7 @@ python analyze_correlation.py     # needs LOG_ALL_SIGNALS=True first
 python kalshi_tracking.py         # needs LOG_KALSHI_PREDICTIONS=True first
 python paper_trading.py          # settle due paper trades and print the account
 python review/kalshi_scalp_backtest.py   # scalping backtest on the cached study data (run kalshi_market_study.py fetch first)
+python review/kalshi_strategy_backtest.py   # residual / streak / vol-regime / basis backtest on the same cache
 ```
 
 ## Runtime-generated files (gitignored -- not source, don't hand-edit)
