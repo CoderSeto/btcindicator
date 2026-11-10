@@ -114,6 +114,12 @@ that set cannot test it.
     one-minute candle, other venues' prices (Binance.US and Bybit history was
     unreachable where this was written), the live order-book signals (no
     history exists), and every threshold other than the ones fixed above.
+RUN NOTE, added after the single run (2026-11-10); nothing above was changed
+and no amendment was made. The cache was built that day and holds 30,950
+contracts, 262 more than the earlier studies' 30,688, so ks.split_cutoff put
+the held-out boundary two days later (2026-08-04): overlapping, but not "the
+same contracts" as stated above. Result: no cell selected on train
+(REVIEW_FINDINGS.md, "Four further strategy hypotheses").
 """
 import numpy as np
 import pandas as pd

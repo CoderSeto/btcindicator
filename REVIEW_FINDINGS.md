@@ -563,3 +563,100 @@ at entry 10, and 1.8-5.3% at entry 5 for 1-2 minute holds (14.0% at 3 minutes).
 ```bash
 python review/kalshi_scalp_backtest.py        # needs the study_data/ cache from kalshi_market_study.py fetch
 ```
+
+
+## Four further strategy hypotheses (2026-11-10)
+
+**Question:** does any of four new entry signals, traded in either direction, earn more than it
+costs on KXBTC15M? **Answer: no. None of the 40 cells is selected on train, so nothing goes to the
+held-out set as a claim.**
+
+Code: `kalshi_strategy_study.py` (tested: `tests/test_kalshi_strategy_study.py`,
+`tests/test_kalshi_strategy_backtest.py`). Run: `python review/kalshi_strategy_backtest.py`. The
+design is pinned in the module docstring and was committed (92ad35a) before any study data had been
+fetched in the environment it was written in. No amendment was made. The held-out set was run once.
+
+### Design, fixed before any result was seen
+
+- **Data, split, costs, intervals:** the edge study's own functions. YES at the ask, NO at 1 − bid,
+  the taker fee rounded up to the cent per order on every leg, fills at the quoted top of book,
+  day-block bootstrap. The cache was rebuilt on 2026-11-10: **30,950 contracts closing 2025-12-15 →
+  2026-11-10**, 262 more than the earlier studies had, so the held-out set (the last 30%, 9,285
+  contracts closing from 2026-08-04) is two days later than theirs, not the identical contracts.
+- **Rules,** each with its mirror, one trade per contract per cell:
+  - `residual_fade` / `residual_follow`: the contract's mid moved at least 3¢ more (or less) over 3
+    minutes than `kalshi.settlement_probability` did on Coinbase's move. Entry 10 or 5 minutes
+    before close; held to settlement, or sold 3 minutes later (an unsaleable exit is held and
+    counted).
+  - `streak_follow` / `streak_fade`: the two previous contracts settled the same way. Entry 13 or 10.
+  - `vol_regime` / `vol_regime_inverse`: 15-minute realized vol at least 1.5× (or at most 1/1.5×)
+    the 120-minute one, mid 10–40¢ from 50¢; buy the underdog after a spike and the favorite in a
+    calm, or the reverse. Entry 10 or 5.
+  - `basis_fade` / `basis_follow`: the strike sat at least 1.5 bp from its trailing 24-hour median
+    distance to Coinbase at open. Entry 13 or 10.
+- **Family:** 20 cells × 2 order sizes = **40 tests**, Bonferroni z = 3.23. Selected on train only
+  if the interval lies entirely above zero.
+
+### Result: every train cell loses; none selected
+
+Each rule's best cell on train (all are 100-contract orders, held to settlement), with the same
+cell held out. The held-out column is descriptive only.
+
+| Rule | Cell | Train trades | Win rate vs break-even (train) | Train mean [family interval] | Held-out mean [interval] |
+|---|---|---|---|---|---|
+| `residual_fade` | 10 min | 9,478 | 44.4% vs 45.3% | −0.9¢ [−2.4, +0.5] | −0.2¢ [−2.3, +2.0] |
+| `residual_follow` | 5 min | 10,622 | 60.8% vs 63.2% | −2.4¢ [−3.5, −1.4] | −1.0¢ [−2.7, +0.8] |
+| `streak_follow` | 10 min | 10,202 | 46.5% vs 50.8% | −4.3¢ [−5.6, −2.9] | −2.4¢ [−4.6, −0.3] |
+| `streak_fade` | 10 min | 10,202 | 53.5% vs 53.6% | −0.1¢ [−1.4, +1.3] | −1.3¢ [−3.4, +0.9] |
+| `vol_regime` | 10 min | 3,336 | 60.9% vs 61.9% | −1.0¢ [−3.3, +1.4] | −1.3¢ [−5.0, +2.4] |
+| `vol_regime_inverse` | 5 min | 2,328 | 31.4% vs 34.7% | −3.3¢ [−5.9, −0.6] | −0.3¢ [−3.9, +3.3] |
+| `basis_fade` | 10 min | 3,666 | 54.1% vs 56.1% | −1.9¢ [−4.2, +0.3] | −5.4¢ [−9.5, −1.2] |
+| `basis_follow` | 10 min | 3,666 | 45.9% vs 48.2% | −2.4¢ [−4.6, −0.1] | +1.9¢ [−2.3, +6.0] |
+
+- **All 40 train means are negative** (−0.1¢ to −6.0¢). In every settlement cell the win rate is
+  below the break-even rate.
+- **The residual sale 3 minutes later is the worst exit:** −2.3¢ to −6.0¢ on train, every interval
+  below zero. It pays the spread and the fee twice, as the scalp study found.
+- **Sample sizes are not the problem.** Every cell has n_eff above 1,000; none is flagged small.
+  Train MDEs are 0.7–2.7¢, so an edge of about 3¢ a contract in any of these cells would have shown.
+  Smaller edges are not ruled out.
+- **Held-out, descriptive:** 36 of 40 cells are negative. The four positive ones are all
+  `basis_follow` (+0.3¢ to +1.9¢), every interval spans zero, and the same cells lose 2.4–3.1¢ on
+  train. A sign that flips between the two sets is noise, not a lead.
+
+### Direction information: real on train in two pairs, smaller than the cost, and unstable
+
+Half the difference between a rule and its mirror estimates what the signal's direction is worth
+per trade before costs (100-lot; descriptive, not a counted test):
+
+| Pair | Train | Held out |
+|---|---|---|
+| residual: fade over follow, 10 min, settlement | +1.3¢ | +1.6¢ |
+| residual: fade over follow, 5 min, settlement | +0.7¢ | −0.4¢ |
+| streak: fade over follow, 13 / 10 min | +2.2¢ / +2.1¢ | +0.6¢ / +0.6¢ |
+| vol regime over its inverse, 10 / 5 min | +1.2¢ / +1.1¢ | +0.5¢ / −1.4¢ |
+| basis: fade over follow, 13 / 10 min | +0.3¢ / +0.2¢ | −2.7¢ / −3.6¢ |
+
+The largest is the streak: after two same-way settlements the contract was priced about 2¢ too far
+toward a third on train. That is the size of one spread plus fee, which is why `streak_fade` lands
+at −0.1¢ rather than above zero, and it shrank to 0.6¢ held out. Nothing here is tradeable by a
+taker.
+
+### What this does and does not rule out
+
+- **Rules out:** these eight rules at these thresholds and entry times, as taker trades at the
+  quoted top of book. Every simplification (zero latency, full fill at the touch, one-minute
+  decisions) flatters the result.
+- **Does not rule out:** other thresholds for the same signals, edges under the MDEs above, maker
+  (resting) orders, anything finer than one-minute candles, other venues' prices (Binance.US and
+  Bybit were unreachable where this was run), and the live order-book signals, which have no
+  history.
+- **Limits of "blind":** the designer had read this file, held-out tables for the earlier studies
+  included, before fixing the design. No number for any of these rules was in it.
+- **Consequence for the bot:** none. Paper trading stays as it is, and no rule here should be
+  offered as an automatic mode.
+
+```bash
+python review/kalshi_strategy_backtest.py                 # on an existing study_data/ cache
+python review/kalshi_strategy_backtest.py --fetch         # builds the cache first (resumable)
+```
