@@ -215,6 +215,21 @@ such, not slipped in quietly.
   model beats the mid, and the combiner is worse than the mid alone.
   `review/kalshi_forecast_backtest.py` runs it.
 
+- `kalshi_flow_study.py` -- the trade-flow forecasting study: does Binance.US
+  taker flow improve P(YES)? Four flow models, each scored against THE SAME
+  MODEL WITHOUT ITS FLOW COLUMNS (`COUNTERPART`) as well as the mid; flow
+  "helps" only by `flow_verdicts`' rule. Owns the Binance.US trade cache
+  (`study_data/binance_us_trades/`, one npz per UTC day): paged by `fromId`,
+  not by time, because a time cursor drops trades sharing a millisecond at a
+  page boundary (the older `fetch_binance_us_trade_history` can); consecutive
+  aggregate-trade ids are what make a hole detectable (`load_trades`), and a
+  window touching one is excluded, not imputed (gotcha 10). Side goes through
+  `exchange_feeds.parse_binance_trade` (gotcha 17); timestamps through
+  `check_plausible_ms` (gotcha 2), which must run BEFORE any range filter or
+  the filter hides the bug. Metrics are `kalshi_study`'s and
+  `kalshi_forecast_study`'s. Result: no detectable effect of flow, no model
+  beats the mid. `review/kalshi_flow_backtest.py` fetches and runs it.
+
 ## Design principles (the "why" behind non-obvious choices)
 
 1. **Never blend independently-sourced probability/confidence numbers
@@ -500,7 +515,7 @@ and is what any new tests should match:
   wall large enough to hide itself under a mean.
 
 Also covered now: `kalshi.py`, `weighting.py`, `backtest.py`, `backtest_agg_delta.py`,
-`kalshi_tracking.py`, `paper_trading.py`, `kalshi_scalp_study.py`, `kalshi_strategy_study.py`, `kalshi_forecast_study.py`, `kalshi_api.py`, `indicators.py`, `divergence.py`,
+`kalshi_tracking.py`, `paper_trading.py`, `kalshi_scalp_study.py`, `kalshi_strategy_study.py`, `kalshi_forecast_study.py`, `kalshi_flow_study.py`, `kalshi_api.py`, `indicators.py`, `divergence.py`,
 `outlook.py`, `dashboard_data.py`, `charts.py` and `app.py`. Writing them turned up three real bugs, all fixed:
 `compute_calibration` borrowed an older row's Kalshi quote (`groupby().first()`
 is per-column) and crashed when only some contracts had quotes, and
@@ -570,6 +585,7 @@ python paper_trading.py          # settle due paper trades and print the account
 python review/kalshi_scalp_backtest.py   # scalping backtest on the cached study data (run kalshi_market_study.py fetch first)
 python review/kalshi_strategy_backtest.py   # residual / streak / vol-regime / basis backtest on the same cache
 python review/kalshi_forecast_backtest.py   # forecasting study: fitted P(YES) models vs the mid, on the same cache
+python review/kalshi_flow_backtest.py --fetch   # cache Binance.US trades; then without --fetch: does trade flow improve P(YES)?
 ```
 
 ## Runtime-generated files (gitignored -- not source, don't hand-edit)

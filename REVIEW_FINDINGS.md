@@ -762,3 +762,93 @@ minutes `platt_market` and `combiner` are 0.0001 lower (0.19021 vs 0.19032), far
 ```bash
 python review/kalshi_forecast_backtest.py     # on the study_data/ cache; saves per-row probabilities next to it
 ```
+
+
+## Trade-flow study: does Binance.US flow improve the forecast? (2026-11-10)
+
+**Question:** does adding Binance.US signed trade flow to a P(YES) forecast make it better than the
+same forecast without flow, and at least not worse than Kalshi's mid? A forecasting study: no fee,
+fill or profit is in any number below. **Answer: no. Flow has no detectable effect on any of the
+four models it was added to, and no model beats the mid.**
+
+Code: `kalshi_flow_study.py` (tested: `tests/test_kalshi_flow_study.py`,
+`tests/test_kalshi_flow_backtest.py`). Run: `python review/kalshi_flow_backtest.py --fetch`, then
+without the flag. The design is pinned in the module docstring and was committed (03a5399) before
+any Binance.US trade had been fetched or any model fitted. No amendment was made. The held-out set
+was scored once.
+
+### Design, fixed before any trade was fetched
+
+- **Trades.** Binance.US `BTCUSDT` aggTrades for the whole span, paged by trade id into one file
+  per UTC day: **1,172,250 trades over 331 days (about 3,500 a day; taker-buy share 53.5%)**. The
+  id sequence has no break, no day is missing and no id is duplicated, so no window had a data hole.
+- **Held-out set: the existing one, not pristine.** Only **9** contracts had settled after the
+  cache's last close when checked; the design required 1,000 for a pristine set. So the held-out
+  set is the 9,285 contracts closing 2026-08-04 → 2026-11-10 that two earlier families were already
+  scored on.
+- **Rows.** The forecasting study's usable rows, less those with fewer than 10 trades in the
+  30-minute window (`thin`: excluded and counted, never imputed): **26,541 held-out rows scored,
+  785 excluded as thin** (2.9%); in train, 3,667 of 59,758 usable rows were thin (6.1%). The scores
+  below are therefore on a subset and are not comparable with the forecasting study's.
+- **Flow features (7),** from trades with timestamp ≤ the quote minute, taker side: notional
+  imbalance over 5 and 30 minutes, trade-count imbalance, large-trade ($10,000+) imbalance, a
+  short-window surge normalised by long-window activity, a flow-versus-return divergence normalised
+  by volatility, and a flag for an empty 5-minute window (3.8–4.8% of scored held-out rows).
+- **Family: 8 fitted models,** four with flow, each paired with the same model without its flow
+  columns: on the mid (`market_flow` / `market_base`), on the mid with volatility and US-hours
+  regime interactions (`market_flow_regime` / `market_regime_base`), on the dashboard's model
+  (`model_flow` / `model_base`), and on both (`both_flow` / `both_base`). L2 logistic, one fit per
+  horizon, tuned on a validation slice inside train.
+- **Statistics.** 60 skill intervals (day-block bootstrap) share one Bonferroni z = 3.34. Flow
+  counts as helping only if both the Brier and log-loss intervals against the flow-free counterpart
+  lie above zero and the model is not worse than the market.
+
+### Result: no detectable effect
+
+| Model | Brier | Log loss | Brier skill vs market [interval] | Brier skill vs flow-free counterpart [interval] | Calibration a / b |
+|---|---|---|---|---|---|
+| **market** (baseline) | 0.13334 | 0.40717 | – | – | −0.038 / 0.998 |
+| asis (baseline) | 0.13771 | 0.42544 | – | – | +0.100 / 0.956 |
+| base_rate (baseline) | 0.24999 | 0.69313 | – | – | constant |
+| `market_base` | 0.13344 | 0.40769 | −0.08% [−0.20, +0.04] | (flow-free) | −0.029 / 0.938 |
+| `market_flow` | 0.13348 | 0.40753 | −0.10% [−0.31, +0.10] | −0.02% [−0.21, +0.16] | −0.040 / 0.957 |
+| `market_regime_base` | 0.13345 | 0.40768 | −0.09% [−0.22, +0.04] | (flow-free) | −0.024 / 0.940 |
+| `market_flow_regime` | 0.13352 | 0.40767 | −0.14% [−0.37, +0.09] | −0.05% [−0.25, +0.14] | −0.035 / 0.955 |
+| `model_base` | 0.13752 | 0.42815 | −3.14% [−4.37, −1.91] | (flow-free) | −0.025 / 0.812 |
+| `model_flow` | 0.13774 | 0.42864 | −3.30% [−4.51, −2.09] | −0.16% [−0.45, +0.14] | −0.039 / 0.809 |
+| `both_base` | 0.13370 | 0.40908 | −0.27% [−0.49, −0.05] | (flow-free) | −0.027 / 0.915 |
+| `both_flow` | 0.13388 | 0.40955 | −0.40% [−0.70, −0.11] | −0.13% [−0.36, +0.10] | −0.039 / 0.912 |
+
+- **The effect of flow is zero to within ±0.2–0.4%.** All eight counterpart intervals (four models,
+  Brier and log loss) span zero; the point estimates run from −0.16% to +0.04%, seven of eight on
+  the wrong side. A flow effect of half a percent of the loss would have shown.
+- **It already failed on validation.** Every flow model had a higher validation log loss than its
+  counterpart (e.g. 0.37063 vs 0.37001 on the mid), before the held-out set was touched.
+- **No model beats the mid.** The four models built on the mid alone are not distinguishable from
+  it; `model_*` and `both_*` are worse. `both_flow` is worse than its `market_flow` component
+  (−0.30% [−0.52, −0.08]): as in the forecasting study, adding the dashboard's model to the price
+  subtracts.
+- **The fitted flow coefficients are small and do not point one way.** On the mid, at 10 minutes,
+  30-minute imbalance is −0.09 and divergence +0.11 logit per standard deviation, largely
+  offsetting; the rest are within ±0.05, with signs that change across horizons. Descriptive only.
+- **Sample sizes.** Every skill interval has n_eff above 10,000 and no reliability bucket is
+  flagged small (smallest n_eff 1,310).
+
+### What this does and does not say
+
+- **Says:** Binance.US taker flow over the previous 5 and 30 minutes carries no information about
+  KXBTC15M settlement that the Kalshi mid, or the dashboard's own model, does not already have.
+- **Does not say** that trade flow is useless. This is one thin venue (about 2.5 trades a minute)
+  quoting USDT, not the three-venue flow the live `agg_delta` pools: Bybit was geo-blocked where
+  this ran and Coinbase has no time-ranged trade history. Deeper venues, order-book inputs (no
+  history exists), sub-minute sampling (Kalshi quotes here are one-minute closes), other windows
+  and non-linear models were not tested.
+- **Not pristine.** The held-out contracts had been scored by two earlier families and the designer
+  had read those results. For a null this matters less than for a positive claim, but it is stated.
+- **Consequence for the bot:** none. `agg_delta` stays a vote in the composite; nothing here
+  supports feeding it into the Kalshi P(YES).
+
+```bash
+python review/kalshi_flow_backtest.py --fetch   # counts new contracts, caches Binance.US trades (resumable, minutes)
+python review/kalshi_flow_backtest.py           # fits on train, scores the held-out set
+```
