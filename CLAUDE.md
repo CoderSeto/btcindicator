@@ -200,6 +200,21 @@ such, not slipped in quietly.
   (`--fetch --kalshi-base-url` builds the cache from a sandbox that cannot
   reach the default Kalshi host). Result in REVIEW_FINDINGS.md.
 
+- `kalshi_forecast_study.py` -- the forecasting study: seven fitted P(YES)
+  models (recalibrations of `settlement_probability`, a tuned structural
+  model, a feature model, the bot's votes, Platt-scaled mid, a fitted
+  combiner) scored held-out by Brier and log loss against the mid, the as-is
+  model and the base rate. NOT a trading rule: no fee or P&L belongs in it
+  (a test fails if `order_fee` appears). Split, bootstrap, Bonferroni, Brier,
+  log loss and the calibration fit are `kalshi_study`'s; the logistic and
+  isotonic fits are its own, in numpy (no scipy/sklearn dependency), each
+  tested against a brute-force reference. `tune_and_fit` must never read a
+  `split == "test"` row and every feature has a look-ahead test: keep both.
+  The combiner is the one sanctioned way to combine market, model and bot
+  (principle 1): fitted on train, compared with each component. Result: no
+  model beats the mid, and the combiner is worse than the mid alone.
+  `review/kalshi_forecast_backtest.py` runs it.
+
 ## Design principles (the "why" behind non-obvious choices)
 
 1. **Never blend independently-sourced probability/confidence numbers
@@ -485,7 +500,7 @@ and is what any new tests should match:
   wall large enough to hide itself under a mean.
 
 Also covered now: `kalshi.py`, `weighting.py`, `backtest.py`, `backtest_agg_delta.py`,
-`kalshi_tracking.py`, `paper_trading.py`, `kalshi_scalp_study.py`, `kalshi_strategy_study.py`, `kalshi_api.py`, `indicators.py`, `divergence.py`,
+`kalshi_tracking.py`, `paper_trading.py`, `kalshi_scalp_study.py`, `kalshi_strategy_study.py`, `kalshi_forecast_study.py`, `kalshi_api.py`, `indicators.py`, `divergence.py`,
 `outlook.py`, `dashboard_data.py`, `charts.py` and `app.py`. Writing them turned up three real bugs, all fixed:
 `compute_calibration` borrowed an older row's Kalshi quote (`groupby().first()`
 is per-column) and crashed when only some contracts had quotes, and
@@ -554,6 +569,7 @@ python kalshi_tracking.py         # needs LOG_KALSHI_PREDICTIONS=True first
 python paper_trading.py          # settle due paper trades and print the account
 python review/kalshi_scalp_backtest.py   # scalping backtest on the cached study data (run kalshi_market_study.py fetch first)
 python review/kalshi_strategy_backtest.py   # residual / streak / vol-regime / basis backtest on the same cache
+python review/kalshi_forecast_backtest.py   # forecasting study: fitted P(YES) models vs the mid, on the same cache
 ```
 
 ## Runtime-generated files (gitignored -- not source, don't hand-edit)

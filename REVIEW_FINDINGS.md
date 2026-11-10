@@ -660,3 +660,105 @@ taker.
 python review/kalshi_strategy_backtest.py                 # on an existing study_data/ cache
 python review/kalshi_strategy_backtest.py --fetch         # builds the cache first (resumable)
 ```
+
+
+## Forecasting study: can P(YES) be forecast better than the market? (2026-11-10)
+
+**Question:** is any fitted probability for a KXBTC15M contract better than Kalshi's mid, than
+`kalshi.settlement_probability` as the dashboard computes it, or than the base rate? This is a
+forecasting study, not a trading rule: no fee, fill or profit is in any number below.
+**Answer: no model beats the market mid. Five are significantly worse, one (the fitted combiner) is
+slightly but significantly worse, and recalibrating the mid changes nothing.**
+
+Code: `kalshi_forecast_study.py` (tested: `tests/test_kalshi_forecast_study.py`,
+`tests/test_kalshi_forecast_backtest.py`). Run: `python review/kalshi_forecast_backtest.py`. The
+design is pinned in the module docstring and was committed (58a9f65) before any model had been
+fitted to a real outcome. No amendment was made. The held-out set was scored once.
+
+### Design, fixed before any result was seen
+
+- **Split, chronological.** Held-out: the existing held-out set, 9,285 contracts closing
+  2026-08-04 19:00 → 2026-11-10. The cache holds nothing later, so there was no fresher set to
+  prefer. **It is not pristine:** earlier studies had scored the mid and the dashboard's model on
+  it, and the designer had read those results. Train is everything before; its last 25% (5,417
+  contracts from 2026-06-08) is the validation slice used for all tuning.
+- **Rows.** One per contract per horizon (10, 5, 2 minutes before close), scored only with a real
+  two-sided book, a plausible strike and every feature present: **27,326 held-out rows**, the same
+  rows for every forecast. At 2 minutes 529 held-out contracts have no two-sided book and are in
+  no score.
+- **Baselines:** `market` (the mid), `asis` (`settlement_probability`, last Coinbase trade,
+  120-minute realized vol), `base_rate` (49.7%, from train).
+- **Family: 7 models,** all fitted on train only, one fit per horizon:
+  `platt_asis` and `iso_asis` (Platt / isotonic recalibration of `asis`); `structural` (vol
+  estimator × spot × tail chosen on validation from 36 candidates, then Platt); `features`
+  (structural plus 5-minute momentum, vol ratio, basis deviation, streak and the bot's net votes,
+  L2 logistic); `bot_only` (the bot's net votes alone); `platt_market` (Platt on the mid);
+  `combiner` (L2 logistic on the mid, structural, `asis` and the same features). The combiner is
+  the only place market, model and bot meet, and it is a fitted model compared with each component.
+- **Statistics.** Skill = 1 − loss(model) / loss(reference) for Brier and log loss, pooled over
+  horizons, with a day-block bootstrap interval. **54 intervals share one Bonferroni z = 3.31.**
+  A model is better or worse only if its interval excludes zero.
+- **Tuning (validation only).** Chosen structural model: EWMA vol with a 30-minute half-life,
+  basis-adjusted spot, Student-t tail with 3 degrees of freedom (validation log loss 0.3767; the
+  worst candidate 0.3829). L2 = 0.1 for both regularized models.
+
+### Result: nothing beats the mid
+
+| Forecast | Brier | Log loss | Brier skill vs market [interval] | Calibration a / b | vs market |
+|---|---|---|---|---|---|
+| **market** (baseline) | 0.13346 | 0.40752 | – | −0.037 / 0.999 | – |
+| asis (baseline) | 0.13798 | 0.42614 | – | +0.104 / 0.957 | – |
+| base_rate (baseline) | 0.24999 | 0.69313 | – | constant | – |
+| `platt_market` | 0.13356 | 0.40803 | −0.08% [−0.20, +0.04] | −0.029 / 0.938 | not distinguishable |
+| `combiner` | 0.13439 | 0.41113 | −0.70% [−1.16, −0.24] | −0.025 / 0.901 | **worse** |
+| `features` | 0.13766 | 0.42366 | −3.15% [−4.45, −1.86] | −0.012 / 0.840 | **worse** |
+| `structural` | 0.13777 | 0.42307 | −3.23% [−4.69, −1.78] | −0.012 / 0.853 | **worse** |
+| `platt_asis` | 0.13786 | 0.42892 | −3.30% [−4.53, −2.07] | −0.024 / 0.811 | **worse** |
+| `iso_asis` | 0.13854 | 0.42785 | −3.81% [−5.10, −2.52] | −0.029 / 0.820 | **worse** |
+| `bot_only` | 0.19234 | 0.56726 | −44.1% [−49.4, −38.8] | +0.008 / 0.963 | **worse** |
+
+Log-loss verdicts against the market are the same in every row.
+
+- **The mid is already calibrated on the held-out months:** slope 0.999 ± 0.016, and every one of
+  its ten reliability buckets contains its own mean forecast. There is nothing for Platt scaling to
+  fix, and `platt_market` (fitted on train, where the slope was ~1.06) is marginally worse.
+- **No model improves on the dashboard's calculation either.** `platt_asis`, `iso_asis`,
+  `structural` and `features` are each not distinguishable from `asis` (skill between −0.65% and
+  +0.72%, every interval spanning zero). The tuned vol, the fat tail, the basis adjustment and the
+  extra features together buy +0.15% Brier skill over `asis`, inside ±1.2%.
+- **Train-fitted recalibration over-sharpens.** Every recalibrated model has a held-out slope of
+  0.81–0.90: on train, prices and the model were too close to 50%, the fits pushed them out, and
+  the held-out months did not need it. This is the same train-to-held-out shift the edge study
+  recorded in the favorite-longshot slope.
+- **The combiner is better than every non-market component** (+2.4% over `structural` and
+  `features`, +30% over `bot_only`, all intervals above zero) **and worse than the market
+  component it contains** (−0.62% vs `platt_market`, −0.70% vs the mid). Adding the model and the
+  bot to the price subtracts information.
+- **The bot's votes carry real but small information.** `bot_only` beats the base rate by 23%
+  (Brier), because its trend votes correlate with where spot sits against a strike set minutes
+  earlier; it is 33–44% worse than either price-based baseline, and `features` is not
+  distinguishable from `structural` without it.
+- **Everything beats the base rate** by 23–47%; that is the low bar, not a finding.
+- **Sample sizes.** Every skill interval has n_eff above 9,000 and no reliability bucket is flagged
+  small (smallest n_eff 1,093). Intervals against the market are ±0.1–1.5%, so a model 2% better
+  than the mid would have shown.
+
+Per horizon (descriptive, no intervals): the mid has the lowest Brier at 5 and 2 minutes; at 10
+minutes `platt_market` and `combiner` are 0.0001 lower (0.19021 vs 0.19032), far inside noise.
+
+### What this does and does not say
+
+- **Says:** with Coinbase one-minute data, the bot's indicators and these model classes, the best
+  available P(YES) is Kalshi's mid, unmodified. The dashboard should keep showing its own P(YES)
+  beside the mid, not in place of it, and no blend of the two is justified (principle 1 now has
+  evidence behind it: the fitted blend is worse than the price alone).
+- **Does not say:** that the mid cannot be beaten with per-second or multi-venue prices, Kalshi's
+  own index feed, order-book inputs, or other model classes; none were tested.
+- **Calibration is not the result.** `bot_only` has the best calibration slope of any fitted model here (0.963)
+  and the worst score of any model. Calibration without sharpness is the base rate.
+- **Not a trading result.** No cost is in these numbers. The edge study already found that taker
+  costs erase differences far larger than any above.
+
+```bash
+python review/kalshi_forecast_backtest.py     # on the study_data/ cache; saves per-row probabilities next to it
+```
