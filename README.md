@@ -732,6 +732,16 @@ index -- see basis risk below -- and volatility from 1-minute candles) than
 a mispricing. Details, including what size of edge the data
 rules out: REVIEW_FINDINGS.md, "Is there an edge?".
 
+**As a probability, the Kalshi mid is the better number.** Two follow-up
+studies scored forecasts, not trades, on the held-out contracts. The mid is
+well calibrated (slope 0.999) and had the lowest Brier score (0.133, against
+0.138 for this model, about 3% worse). Recalibrating the model, fitting a
+blend of model, mid and the bot's signals, and adding Binance.US trade flow
+all failed to beat the mid, and the blend was worse than the mid it contained.
+The model's value is pricing when no two-sided quote exists, which that
+comparison could not test. Details: REVIEW_FINDINGS.md, "Forecasting study"
+and "Trade-flow study".
+
 **Limitations, stated plainly:**
 
 - **Basis risk.** Kalshi settles on CF Benchmarks' Real-Time Index — a

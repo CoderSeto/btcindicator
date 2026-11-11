@@ -347,7 +347,10 @@ if (kalshi_result["available"] and kalshi_live and kalshi_live["available"]
 MODEL_VS_MARKET_NOTE = (
     "Model minus market is not a trading signal. On 30,688 settled KXBTC15M contracts the model "
     "scored worse than Kalshi's own mid on held-out data, and trading toward it lost money after "
-    "fees (REVIEW_FINDINGS.md, \"Is there an edge?\")."
+    "fees (REVIEW_FINDINGS.md, \"Is there an edge?\"). As a probability the mid is the better "
+    "number: Brier 0.138 for the model vs 0.133 for the mid (about 3% worse), the mid is already "
+    "calibrated, and recalibrating the model, blending it with the mid, or adding Binance.US "
+    "trade flow did not beat the mid (REVIEW_FINDINGS.md, forecasting and trade-flow studies)."
 )
 
 kalshi_quote = None

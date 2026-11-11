@@ -751,6 +751,10 @@ def test_the_model_vs_market_gap_carries_the_studys_answer_wherever_it_is_shown(
     assert captions, "no caveat next to the Market YES gap"
     assert all("scored worse than Kalshi's own mid on held-out data" in c and "Is there an edge?" in c
                for c in captions)
+    # ...and the forecasting studies' answer: as a probability the mid is the better number.
+    assert all("Brier 0.138 for the model vs 0.133 for the mid" in c and "trade flow" in c
+               for c in captions)
+    assert "Brier 0.138 for the model vs 0.133 for the mid" in (metric(at, "Kalshi P(YES)").help or "")
     notes = all_text(at)
     assert "it can reflect a real mispricing" not in notes                 # the old framing is gone
     # With no market quote there is no gap, and no caveat about one.
